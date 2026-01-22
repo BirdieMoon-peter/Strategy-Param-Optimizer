@@ -77,3 +77,5 @@ test_data_*.csv
 
 # Optimization results
 optimization_results/
+
+参数空间优化指南.md

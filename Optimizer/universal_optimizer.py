@@ -20,6 +20,7 @@ from backtest_engine import BacktestEngine, BacktestResult
 from bayesian_optimizer import BayesianOptimizer
 from config import StrategyParam, BayesianOptConfig
 from strategy_analyzer import SearchSpaceConfig as ParamSearchSpaceConfig
+from param_space_optimizer import ParamSpaceOptimizer
 
 # 定义内部 SearchSpaceConfig
 @dataclass  
@@ -71,6 +72,9 @@ class UniversalOptimizer:
         # 创建输出目录
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
+        
+        # 初始化参数空间优化器（需要在加载策略之前初始化）
+        self.param_space_optimizer = ParamSpaceOptimizer(verbose=self.verbose)
         
         # 加载数据
         self.data = self._load_data()
@@ -179,7 +183,7 @@ class UniversalOptimizer:
         return strategy_class, strategy_info
     
     def _extract_strategy_params(self, strategy_class) -> List[StrategyParam]:
-        """提取策略参数"""
+        """提取并优化策略参数空间"""
         params = []
         
         if hasattr(strategy_class, 'params'):
@@ -190,28 +194,29 @@ class UniversalOptimizer:
                     # 推断参数类型
                     param_type = type(default_value).__name__
                     
-                    # 推断合理的范围
-                    if isinstance(default_value, int):
-                        min_val = max(1, int(default_value * 0.3))
-                        max_val = int(default_value * 3)
-                        step = 1
-                    elif isinstance(default_value, float):
-                        min_val = max(0.0001, default_value * 0.3)
-                        max_val = default_value * 3
-                        step = None
-                    else:
+                    # 跳过非数值类型
+                    if not isinstance(default_value, (int, float)):
                         continue
                     
+                    # 创建基础参数（不设置范围，将由优化器处理）
                     param = StrategyParam(
                         name=param_name,
                         param_type=param_type,
                         default_value=default_value,
-                        min_value=min_val,
-                        max_value=max_val,
-                        step=step,
-                        description=f"{param_name} parameter"
+                        description=f"{param_name} parameter",
+                        min_value=None,
+                        max_value=None,
+                        step=None
                     )
                     params.append(param)
+        
+        # 使用参数空间优化器生成智能的搜索空间
+        if params:
+            strategy_name = strategy_class.__name__
+            params = self.param_space_optimizer.generate_space(
+                params,
+                strategy_type=strategy_name
+            )
         
         return params
     
@@ -269,11 +274,30 @@ class UniversalOptimizer:
         
         # 提取回测结果
         best_result = opt_result.backtest_result
+        best_params = opt_result.best_params  # 从优化结果中获取最优参数
         
-        # 3. 生成详细结果（包含LLM解释）
+        # 3. 分析参数空间使用情况
+        if self.verbose:
+            print(f"\n{'='*60}")
+            print("参数空间分析")
+            print(f"{'='*60}")
+        
+        param_analysis = self.param_space_optimizer.analyze_optimization_results(
+            best_params,
+            search_space_config.strategy_params
+        )
+        
+        if self.verbose and param_analysis["suggestions"]:
+            print("\n💡 参数空间优化建议:")
+            for suggestion in param_analysis["suggestions"]:
+                print(f"  • {suggestion}")
+            print(f"{'='*60}\n")
+        
+        # 4. 生成详细结果（包含LLM解释和参数空间分析）
         result = self._generate_result(best_result)
+        result["param_space_analysis"] = param_analysis
         
-        # 4. 保存结果
+        # 5. 保存结果
         output_path = self._save_result(result)
         
         if self.verbose:
