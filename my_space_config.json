@@ -1,0 +1,16 @@
+{
+    "param_space": {
+        "period": {
+            "min": 10,
+            "max": 50,
+            "step": 1,
+            "distribution": "int_uniform"
+        },
+        "devfactor": {
+            "min": 1.0,
+            "max": 4.0,
+            "step": null,
+            "distribution": "uniform"
+        }
+    }
+}

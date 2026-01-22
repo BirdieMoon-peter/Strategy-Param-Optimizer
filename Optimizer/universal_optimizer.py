@@ -50,7 +50,8 @@ class UniversalOptimizer:
         llm_config: Optional[UniversalLLMConfig] = None,
         output_dir: str = "./optimization_results",
         verbose: bool = True,
-        target_params: Optional[List[str]] = None
+        target_params: Optional[List[str]] = None,
+        custom_space: Optional[Dict[str, Dict]] = None
     ):
         """
         初始化优化器
@@ -64,6 +65,7 @@ class UniversalOptimizer:
             output_dir: 输出目录
             verbose: 是否打印详细信息
             target_params: 指定要优化的参数列表，为None时优化所有参数
+            custom_space: 自定义参数空间配置，格式: {param_name: {min, max, step, distribution}}
         """
         self.data_path = data_path
         self.strategy_path = strategy_path
@@ -71,6 +73,7 @@ class UniversalOptimizer:
         self.use_llm = use_llm
         self.verbose = verbose
         self.target_params = target_params  # 指定要优化的参数
+        self.custom_space = custom_space  # 自定义参数空间
         
         # 创建输出目录
         self.output_dir = Path(output_dir)
@@ -240,7 +243,48 @@ class UniversalOptimizer:
                 strategy_type=strategy_name
             )
         
+        # 应用自定义参数空间配置（如果提供）
+        if self.custom_space and params:
+            params = self._apply_custom_space(params)
+        
         return params
+    
+    def _apply_custom_space(self, params: List[StrategyParam]) -> List[StrategyParam]:
+        """
+        应用自定义参数空间配置
+        
+        Args:
+            params: 原始参数列表
+            
+        Returns:
+            应用自定义配置后的参数列表
+        """
+        if not self.custom_space:
+            return params
+        
+        updated_params = []
+        for param in params:
+            if param.name in self.custom_space:
+                custom = self.custom_space[param.name]
+                
+                # 使用自定义配置覆盖默认值
+                new_param = StrategyParam(
+                    name=param.name,
+                    param_type=param.param_type,
+                    default_value=param.default_value,
+                    description=custom.get('description', param.description),
+                    min_value=custom.get('min', param.min_value),
+                    max_value=custom.get('max', param.max_value),
+                    step=custom.get('step', param.step)
+                )
+                updated_params.append(new_param)
+                
+                if self.verbose:
+                    print(f"[自定义空间] {param.name}: [{new_param.min_value}, {new_param.max_value}]")
+            else:
+                updated_params.append(param)
+        
+        return updated_params
     
     def optimize(
         self,

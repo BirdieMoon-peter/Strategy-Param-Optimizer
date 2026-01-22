@@ -67,6 +67,38 @@ def load_target_params(params_file: str) -> list:
     return params
 
 
+def load_space_config(config_file: str) -> dict:
+    """
+    从 JSON 文件加载参数空间配置
+    
+    Args:
+        config_file: 参数空间配置文件路径
+        
+    Returns:
+        参数空间配置字典
+    """
+    if not Path(config_file).exists():
+        raise FileNotFoundError(f"参数空间配置文件不存在: {config_file}")
+    
+    with open(config_file, 'r', encoding='utf-8') as f:
+        config = json.load(f)
+    
+    # 验证配置格式
+    if 'param_space' not in config:
+        raise ValueError("配置文件必须包含 'param_space' 字段")
+    
+    param_space = config['param_space']
+    
+    # 验证每个参数的配置
+    for param_name, param_config in param_space.items():
+        if 'min' not in param_config or 'max' not in param_config:
+            raise ValueError(f"参数 '{param_name}' 必须指定 'min' 和 'max'")
+        if param_config['min'] >= param_config['max']:
+            raise ValueError(f"参数 '{param_name}' 的 min 必须小于 max")
+    
+    return param_space
+
+
 def prepare_data(data_path: str) -> str:
     """
     准备数据文件：确保有 datetime 列
@@ -266,6 +298,11 @@ def main():
         default=None,
         help="指定要优化的参数列表文件（每行一个参数名），不指定则优化所有参数"
     )
+    parser.add_argument(
+        "--space-config", "-S",
+        default=None,
+        help="参数空间配置文件（JSON格式），用于手动指定参数搜索范围，参考 space_config_example.json"
+    )
     
     # LLM参数
     parser.add_argument(
@@ -336,6 +373,19 @@ def main():
             print(f"❌ 错误: 读取参数文件失败: {e}")
             return 1
     
+    # 加载参数空间配置（如果指定了配置文件）
+    custom_space = None
+    if args.space_config:
+        if not Path(args.space_config).exists():
+            print(f"❌ 错误: 参数空间配置文件不存在: {args.space_config}")
+            return 1
+        try:
+            custom_space = load_space_config(args.space_config)
+            print(f"[配置] 已加载自定义参数空间: {list(custom_space.keys())}")
+        except Exception as e:
+            print(f"❌ 错误: 读取参数空间配置文件失败: {e}")
+            return 1
+    
     # 打印配置信息
     if not args.quiet:
         print("\n" + "="*60)
@@ -349,6 +399,10 @@ def main():
             print(f"指定参数: {target_params}")
         else:
             print(f"指定参数: 全部参数")
+        if custom_space:
+            print(f"自定义空间: {list(custom_space.keys())}")
+        else:
+            print(f"参数空间: 自动生成（智能规则）")
         print(f"使用LLM: {'是' if args.use_llm else '否'}")
         if args.use_llm:
             print(f"LLM类型: {args.llm_type}")
@@ -393,7 +447,8 @@ def main():
             llm_config=llm_config,
             output_dir=str(output_dir),
             verbose=not args.quiet,
-            target_params=target_params
+            target_params=target_params,
+            custom_space=custom_space
         )
         
         # 5. 执行优化
