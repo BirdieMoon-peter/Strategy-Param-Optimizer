@@ -49,7 +49,8 @@ class UniversalOptimizer:
         use_llm: bool = False,
         llm_config: Optional[UniversalLLMConfig] = None,
         output_dir: str = "./optimization_results",
-        verbose: bool = True
+        verbose: bool = True,
+        target_params: Optional[List[str]] = None
     ):
         """
         初始化优化器
@@ -62,12 +63,14 @@ class UniversalOptimizer:
             llm_config: LLM配置（如果use_llm为True则必须提供）
             output_dir: 输出目录
             verbose: 是否打印详细信息
+            target_params: 指定要优化的参数列表，为None时优化所有参数
         """
         self.data_path = data_path
         self.strategy_path = strategy_path
         self.objective = objective
         self.use_llm = use_llm
         self.verbose = verbose
+        self.target_params = target_params  # 指定要优化的参数
         
         # 创建输出目录
         self.output_dir = Path(output_dir)
@@ -185,6 +188,7 @@ class UniversalOptimizer:
     def _extract_strategy_params(self, strategy_class) -> List[StrategyParam]:
         """提取并优化策略参数空间"""
         params = []
+        all_param_names = []  # 记录所有参数名，用于验证
         
         if hasattr(strategy_class, 'params'):
             for param_name in dir(strategy_class.params):
@@ -198,6 +202,13 @@ class UniversalOptimizer:
                     if not isinstance(default_value, (int, float)):
                         continue
                     
+                    all_param_names.append(param_name)
+                    
+                    # 如果指定了目标参数列表，只提取指定的参数
+                    if self.target_params is not None:
+                        if param_name not in self.target_params:
+                            continue
+                    
                     # 创建基础参数（不设置范围，将由优化器处理）
                     param = StrategyParam(
                         name=param_name,
@@ -209,6 +220,17 @@ class UniversalOptimizer:
                         step=None
                     )
                     params.append(param)
+        
+        # 验证目标参数是否都存在于策略中
+        if self.target_params is not None:
+            invalid_params = [p for p in self.target_params if p not in all_param_names]
+            if invalid_params:
+                if self.verbose:
+                    print(f"[警告] 以下参数不存在于策略中，将被忽略: {invalid_params}")
+                    print(f"[提示] 可用的参数: {all_param_names}")
+            
+            if self.verbose and params:
+                print(f"[参数过滤] 仅优化指定参数: {[p.name for p in params]}")
         
         # 使用参数空间优化器生成智能的搜索空间
         if params:

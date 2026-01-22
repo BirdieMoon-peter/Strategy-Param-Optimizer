@@ -13,6 +13,9 @@
   # 指定优化目标和试验次数
   python run_optimizer.py --data project_trend/data/AG.csv --strategy project_trend/src/Aberration.py --objective annual_return --trials 100
 
+  # 指定要优化的参数（通过params.txt文件）
+  python run_optimizer.py --data project_trend/data/AG.csv --strategy project_trend/src/Aberration.py --params-file params.txt
+
   # 完整参数
   python run_optimizer.py --data project_trend/data/AG.csv --strategy project_trend/src/Aberration.py --objective sharpe_ratio --trials 50 --use-llm --llm-model xuanyuan --output ./my_results
 """
@@ -35,6 +38,33 @@ import universal_optimizer
 import universal_llm_client
 UniversalOptimizer = universal_optimizer.UniversalOptimizer
 UniversalLLMConfig = universal_llm_client.UniversalLLMConfig
+
+
+def load_target_params(params_file: str) -> list:
+    """
+    从文件加载要优化的参数列表
+    
+    Args:
+        params_file: 参数文件路径，每行一个参数名
+        
+    Returns:
+        参数名列表
+    """
+    if not Path(params_file).exists():
+        raise FileNotFoundError(f"参数文件不存在: {params_file}")
+    
+    params = []
+    with open(params_file, 'r', encoding='utf-8') as f:
+        for line in f:
+            # 去除空白字符和注释
+            param = line.strip()
+            if param and not param.startswith('#'):
+                params.append(param)
+    
+    if not params:
+        raise ValueError(f"参数文件为空或没有有效参数: {params_file}")
+    
+    return params
 
 
 def prepare_data(data_path: str) -> str:
@@ -231,6 +261,11 @@ def main():
         default=50,
         help="优化试验次数（默认: 50）"
     )
+    parser.add_argument(
+        "--params-file", "-p",
+        default=None,
+        help="指定要优化的参数列表文件（每行一个参数名），不指定则优化所有参数"
+    )
     
     # LLM参数
     parser.add_argument(
@@ -289,6 +324,18 @@ def main():
         print(f"❌ 错误: 策略文件不存在: {args.strategy}")
         return 1
     
+    # 加载目标参数列表（如果指定了参数文件）
+    target_params = None
+    if args.params_file:
+        if not Path(args.params_file).exists():
+            print(f"❌ 错误: 参数文件不存在: {args.params_file}")
+            return 1
+        try:
+            target_params = load_target_params(args.params_file)
+        except Exception as e:
+            print(f"❌ 错误: 读取参数文件失败: {e}")
+            return 1
+    
     # 打印配置信息
     if not args.quiet:
         print("\n" + "="*60)
@@ -298,6 +345,10 @@ def main():
         print(f"策略文件: {args.strategy}")
         print(f"优化目标: {args.objective}")
         print(f"试验次数: {args.trials}")
+        if target_params:
+            print(f"指定参数: {target_params}")
+        else:
+            print(f"指定参数: 全部参数")
         print(f"使用LLM: {'是' if args.use_llm else '否'}")
         if args.use_llm:
             print(f"LLM类型: {args.llm_type}")
@@ -341,7 +392,8 @@ def main():
             use_llm=args.use_llm,
             llm_config=llm_config,
             output_dir=str(output_dir),
-            verbose=not args.quiet
+            verbose=not args.quiet,
+            target_params=target_params
         )
         
         # 5. 执行优化

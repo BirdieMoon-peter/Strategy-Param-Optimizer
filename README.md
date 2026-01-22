@@ -10,6 +10,7 @@
 ✅ **多目标优化** - 支持夏普比率、年化收益率、最大回撤等多种优化目标  
 ✅ **智能参数空间** - 🆕 自动根据参数类型生成合理的搜索范围，提升优化效率  
 ✅ **参数空间分析** - 🆕 自动分析优化结果，给出参数空间改进建议  
+✅ **选择性优化** - 🆕 支持指定要优化的参数，其他参数保持默认值  
 ✅ **LLM集成** - 可选集成大语言模型进行智能参数分析  
 ✅ **命令行友好** - 简单易用的命令行接口，支持批处理  
 ✅ **详细输出** - 生成JSON格式结果和可读的文本摘要
@@ -66,6 +67,7 @@ pip install -r requirements.txt
 |------|------|--------|------|
 | `--objective` | `-o` | `sharpe_ratio` | 优化目标 |
 | `--trials` | `-t` | `50` | 优化试验次数 |
+| `--params-file` | `-p` | - | 指定要优化的参数列表文件 🆕 |
 
 **可选的优化目标：**
 - `sharpe_ratio` - 夏普比率（默认，推荐）
@@ -97,104 +99,50 @@ pip install -r requirements.txt
 
 ## 💡 使用示例
 
-### 1. 基本用法（不使用LLM）
-
-最简单的调用方式，使用默认配置：
+### 基本用法
 
 ```bash
-python run_optimizer.py \
-  -d project_trend/data/AG.csv \
-  -s project_trend/src/Aberration.py
+# 1. 最简单用法（优化所有参数）
+python run_optimizer.py -d data.csv -s strategy.py
+
+# 2. 指定试验次数
+python run_optimizer.py -d data.csv -s strategy.py --trials 100
+
+# 3. 只优化指定参数（推荐）
+echo "period" > params.txt
+echo "devfactor" >> params.txt
+python run_optimizer.py -d data.csv -s strategy.py --params-file params.txt
+
+# 4. 更改优化目标
+python run_optimizer.py -d data.csv -s strategy.py --objective annual_return
+
+# 5. 使用 LLM 辅助
+python run_optimizer.py -d data.csv -s strategy.py --use-llm
 ```
 
-### 2. 指定优化目标
+### 参数文件格式
 
-优化年化收益率而不是夏普比率：
+创建 `params.txt`，每行一个参数名：
 
-```bash
-python run_optimizer.py \
-  -d project_trend/data/BTC.csv \
-  -s project_trend/src/Aberration.py \
-  --objective annual_return
+```txt
+# 这是注释，以 # 开头
+period
+devfactor
+# 空行会被忽略
 ```
 
-### 3. 调整试验次数
+**注意：** 参数名必须与策略中定义的完全一致
 
-增加试验次数以获得更好的结果（但需要更长时间）：
-
-```bash
-python run_optimizer.py \
-  -d project_trend/data/AG.csv \
-  -s project_trend/src/Aberration.py \
-  --trials 100
-```
-
-### 4. 使用本地Ollama LLM
-
-启用LLM辅助优化（需要先启动Ollama服务）：
-
-```bash
-# 先启动Ollama（在另一个终端）
-ollama serve
-
-# 运行优化
-python run_optimizer.py \
-  -d project_trend/data/BTC.csv \
-  -s project_trend/src/Aberration.py \
-  --use-llm
-```
-
-### 5. 使用OpenAI API
-
-使用OpenAI的GPT模型进行LLM辅助：
-
-```bash
-python run_optimizer.py \
-  -d project_trend/data/AG.csv \
-  -s project_trend/src/Aberration.py \
-  --use-llm \
-  --llm-type openai \
-  --llm-model gpt-4 \
-  --api-key sk-your-api-key-here
-```
-
-### 6. 指定输出目录
-
-将结果保存到自定义目录：
-
-```bash
-python run_optimizer.py \
-  -d project_trend/data/BTC.csv \
-  -s project_trend/src/Aberration.py \
-  --output ./my_optimization_results
-```
-
-### 7. 静默模式
-
-减少输出信息，适合批处理：
-
-```bash
-python run_optimizer.py \
-  -d project_trend/data/AG.csv \
-  -s project_trend/src/Aberration.py \
-  --quiet
-```
-
-### 8. 完整参数示例
-
-使用所有主要参数的完整示例：
+### 完整示例
 
 ```bash
 python run_optimizer.py \
   --data project_trend/data/BTC.csv \
   --strategy project_trend/src/Aberration.py \
+  --params-file params.txt \
   --objective sharpe_ratio \
   --trials 100 \
-  --use-llm \
-  --llm-type ollama \
-  --llm-model xuanyuan \
-  --output ./results \
-  --quiet
+  --output ./results
 ```
 
 ---
@@ -230,281 +178,160 @@ date,open,high,low,close,volume
 
 ---
 
-## 📁 输出文件说明
+## 📁 输出文件
 
-### 输出目录结构
+优化完成后会在输出目录生成两个文件：
 
 ```
 optimization_results/
-├── optimization_BTC_AberrationStrategy_20260122_105954.json  # 完整JSON结果
-└── optimization_summary.txt                                   # 文本摘要
+├── optimization_BTC_Strategy_20260122_105954.json  # 完整JSON结果
+└── optimization_summary.txt                         # 易读的文本摘要
 ```
 
-### JSON文件内容
+**JSON文件包含：**
+- 优化信息（标的、策略、目标、时间）
+- 最优参数
+- 性能指标（夏普比率、收益率、回撤等）
+- 逐年表现
+- 参数空间分析建议 🆕
 
-```json
-{
-  "optimization_info": {
-    "asset_name": "BTC",
-    "strategy_name": "AberrationStrategy",
-    "optimization_objective": "sharpe_ratio",
-    "optimization_time": "2026-01-22 10:59:54",
-    "data_range": {
-      "start": "2017-08-17",
-      "end": "2025-12-31",
-      "total_days": 3059
-    }
-  },
-  "best_parameters": {
-    "period": 103,
-    "std_dev_upper": 2.47,
-    "std_dev_lower": 3.46,
-    "percent": 0.35,
-    "allow_short": 2
-  },
-  "performance_metrics": {
-    "sharpe_ratio": 1.3385,
-    "annual_return": 10.51,
-    "max_drawdown": 19.53,
-    "total_return": 235.65,
-    "final_value": 335648.71,
-    "trades_count": 11,
-    "win_rate": 72.73
-  },
-  "yearly_performance": {
-    "2017": {"return": 12.17, "drawdown": 15.58, "sharpe_ratio": 1.0225},
-    "2018": {"return": 8.44, "drawdown": 5.24, "sharpe_ratio": 0.8543},
-    ...
-  },
-  "llm_explanation": {
-    "parameter_explanation": "参数优化完成，以上为最优参数组合",
-    "key_insights": [
-      "优化目标: sharpe_ratio",
-      "回测期: 2017-08-17 至 2025-12-31",
-      "历史表现不代表未来收益"
-    ]
-  }
-}
-```
-
-### 文本摘要内容
-
-`optimization_summary.txt` 包含易读的优化结果摘要：
-
-```
-============================================================
-策略优化结果摘要
-============================================================
-
-优化时间: 2026-01-22 10:59:54
-标的: BTC
-策略: AberrationStrategy
-优化目标: sharpe_ratio
-
-【最优参数】
-  period: 103
-  std_dev_upper: 2.4702
-  std_dev_lower: 3.455
-  percent: 0.3474
-  allow_short: 2.0
-
-【性能指标】
-  sharpe_ratio: 1.3385
-  annual_return: 10.51
-  max_drawdown: 19.53
-  ...
-```
+**文本摘要包含：**
+- 最优参数值
+- 关键性能指标
+- 逐年表现摘要
+- 优化建议
 
 ---
 
 ## 🔧 策略脚本要求
 
-### 基本要求
+策略脚本必须：
+1. 继承自 `backtrader.Strategy`
+2. 使用 `params` 元组定义参数
 
-您的策略脚本必须：
-
-1. 定义一个继承自 `backtrader.Strategy` 的策略类
-2. 使用 `params` 定义可优化的参数
-
-### 策略示例
+### 简单示例
 
 ```python
 import backtrader as bt
 
 class MyStrategy(bt.Strategy):
-    """我的自定义策略"""
-    
     params = (
-        ('period', 20),           # 周期参数
-        ('threshold', 0.02),      # 阈值参数
-        ('stop_loss', 0.05),      # 止损参数
+        ('period', 20),      # 整数参数
+        ('threshold', 0.02), # 浮点参数
     )
     
     def __init__(self):
         self.sma = bt.indicators.SMA(self.data.close, period=self.params.period)
     
     def next(self):
-        if not self.position:
-            if self.data.close[0] > self.sma[0] * (1 + self.params.threshold):
-                self.buy()
-        else:
-            if self.data.close[0] < self.sma[0]:
-                self.sell()
+        if not self.position and self.data.close > self.sma * 1.02:
+            self.buy()
+        elif self.position and self.data.close < self.sma:
+            self.sell()
 ```
 
-### 参数命名规范
-
-- 参数名使用小写字母和下划线
-- 整数参数（如周期）会在 [min, max] 范围内以整数步长搜索
-- 浮点数参数会在 [min, max] 范围内连续搜索
+**参数命名：** 使用小写+下划线，如 `fast_period`、`stop_loss`
 
 ---
 
 ## ❓ 常见问题
 
-### Q1: 脚本运行很慢怎么办？
+### Q1: 如何只优化部分参数？
 
-**A:** 可以减少试验次数：
+创建 `params.txt` 文件，每行一个参数名，然后使用 `--params-file` 参数。
 
-```bash
-python run_optimizer.py -d data.csv -s strategy.py --trials 20
-```
+**适用场景：** 策略参数多（>5个）、已知某些参数合理值、加快优化速度
 
-或使用静默模式减少输出开销：
+### Q2: 参数空间分析建议如何理解？
 
-```bash
-python run_optimizer.py -d data.csv -s strategy.py --quiet
-```
+优化后系统会提示参数是否在边界：
+- **在边界** → 扩大搜索范围重新优化
+- **在中间** → 参数空间设置合理
+- **都在边界** → 可能策略逻辑有问题
 
-### Q2: LLM连接超时怎么办？
+### Q3: 优化运行慢怎么办？
 
-**A:** 增加超时时间：
+- 减少试验次数：`--trials 20`
+- 使用参数文件只优化关键参数
+- 使用静默模式：`--quiet`
 
-```bash
-python run_optimizer.py -d data.csv -s strategy.py --use-llm --timeout 300
-```
+### Q4: 数据文件格式错误？
 
-或检查Ollama服务是否正常运行：
+确保CSV包含必需列：`datetime/date, open, high, low, close, volume`
 
-```bash
-curl http://localhost:11434/api/tags
-```
-
-### Q3: 数据文件格式错误怎么办？
-
-**A:** 确保CSV文件包含必需的列：`datetime/date, open, high, low, close, volume`
-
-如果列名不同，可以预处理数据：
-
+列名不同时预处理：
 ```python
 import pandas as pd
 df = pd.read_csv('original.csv')
-df = df.rename(columns={'时间': 'datetime', '开盘': 'open', ...})
+df.rename(columns={'时间': 'datetime', '开盘': 'open'}, inplace=True)
 df.to_csv('processed.csv', index=False)
 ```
 
-### Q4: 如何批量优化多个标的？
-
-**A:** 使用bash脚本循环：
+### Q5: 如何批量优化？
 
 ```bash
-#!/bin/bash
 for asset in BTC ETH SOL; do
-  python run_optimizer.py \
-    -d "project_trend/data/${asset}.csv" \
-    -s "project_trend/src/Aberration.py" \
-    --output "./results/${asset}"
+  python run_optimizer.py -d data/${asset}.csv -s strategy.py -O results/${asset}
 done
 ```
-
-### Q5: 优化结果不理想怎么办？
-
-**A:** 尝试以下方法：
-
-1. **增加试验次数**：`--trials 200`
-2. **更改优化目标**：`--objective annual_return`
-3. **使用LLM辅助**：`--use-llm`
-4. **检查策略逻辑**：确保策略参数范围合理
-5. **检查数据质量**：确保数据完整无误
-
-### Q6: 如何解读年度表现？
-
-**A:** 输出中的年度表现包括：
-
-- **收益** - 该年的收益率（%）
-- **回撤** - 该年的最大回撤（%）
-- **夏普** - 该年的夏普比率
-
-如果某年显示 "无交易"，说明该年策略未产生交易信号。
 
 ---
 
 ## 🎯 进阶用法
 
-### 1. 与其他工具集成
+### 1. 迭代优化
 
-#### 与Jupyter Notebook集成
-
-```python
-import subprocess
-import json
-
-# 运行优化
-result = subprocess.run([
-    'python', 'run_optimizer.py',
-    '-d', 'data/BTC.csv',
-    '-s', 'strategies/my_strategy.py',
-    '--quiet'
-], capture_output=True, text=True)
-
-# 读取结果
-with open('optimization_results/optimization_*.json') as f:
-    data = json.load(f)
-    
-print(f"最佳夏普比率: {data['performance_metrics']['sharpe_ratio']}")
-```
-
-#### 与Airflow集成
-
-```python
-from airflow import DAG
-from airflow.operators.bash import BashOperator
-from datetime import datetime
-
-dag = DAG('strategy_optimization', start_date=datetime(2024, 1, 1))
-
-optimize_task = BashOperator(
-    task_id='optimize_strategy',
-    bash_command='python run_optimizer.py -d data.csv -s strategy.py',
-    dag=dag
-)
-```
-
-### 2. 自定义优化目标
-
-如果需要自定义优化目标，可以修改 `Optimizer/config.py`，添加新的目标函数。
-
-### 3. 并行优化
-
-使用GNU Parallel进行多策略并行优化：
+第一轮发现参数在边界 → 第二轮针对性优化：
 
 ```bash
-parallel python run_optimizer.py -d data/{1}.csv -s src/{2}.py -O results/{1}_{2} \
-  ::: BTC ETH SOL \
-  ::: Aberration Bollinger Keltner
+# 第一轮
+python run_optimizer.py -d data.csv -s strategy.py --trials 50
+
+# 如果 period 在边界，第二轮只优化它
+echo "period" > params.txt
+python run_optimizer.py -d data.csv -s strategy.py --params-file params.txt --trials 100
 ```
 
-### 4. 参数敏感性分析
+### 2. 参数敏感性分析
 
-连续运行多次优化，分析参数稳定性：
+逐个优化参数，找出影响大的关键参数：
 
 ```bash
-for i in {1..10}; do
-  python run_optimizer.py -d data.csv -s strategy.py --output "results/run_${i}"
+# 只优化 period
+echo "period" > params_period.txt
+python run_optimizer.py -d data.csv -s strategy.py --params-file params_period.txt
+
+# 只优化 devfactor
+echo "devfactor" > params_devfactor.txt
+python run_optimizer.py -d data.csv -s strategy.py --params-file params_devfactor.txt
+
+# 比较性能提升，找出敏感参数
+```
+
+### 3. 并行优化多标的
+
+```bash
+# 使用 GNU Parallel
+parallel python run_optimizer.py -d data/{}.csv -s strategy.py -O results/{} \
+  ::: BTC ETH SOL
+
+# 或使用 bash 循环
+for asset in BTC ETH SOL; do
+  python run_optimizer.py -d data/${asset}.csv -s strategy.py -O results/${asset} &
 done
+wait
 ```
 
-然后分析所有运行的最优参数分布。
+### 4. 参数稳定性验证
+
+多次运行检验参数稳定性：
+
+```bash
+for i in {1..5}; do
+  python run_optimizer.py -d data.csv -s strategy.py -O results/run_${i}
+done
+# 比较各次最优参数是否接近
+```
 
 ---
 
@@ -523,6 +350,8 @@ done
 - ✅ 根据初步结果调整试验次数
 - ✅ 选择合适的优化目标（通常用夏普比率）
 - ✅ 对于快速测试使用 `--quiet` 模式
+- ✅ 策略参数多（>5个）时，考虑使用 `--params-file` 只优化关键参数
+- ✅ 优先优化对策略影响大的参数（如周期、阈值）
 
 ### 3. 结果验证
 
@@ -559,9 +388,34 @@ python run_optimizer.py -d data.csv -s strategy.py
 
 ### 相关文档
 
+- [参数空间优化指南](参数空间优化指南.md) 🆕
 - [Optimizer模块总览](Optimizer/项目总览.md)
 - [通用优化器指南](Optimizer/UNIVERSAL_OPTIMIZER_GUIDE.md)
 - [Backtrader官方文档](https://www.backtrader.com/docu/)
+
+---
+
+## 🧠 智能参数空间说明
+
+### 自动参数空间生成
+
+系统会根据参数类型和名称自动生成合理的搜索范围：
+
+| 参数类型 | 识别模式 | 默认范围 | 示例 |
+|---------|---------|---------|------|
+| 周期参数 | `period`, `window`, `length` | [默认值×0.5 ~ 2.5], 限制[5,200] | `period=20` → [10,50] |
+| 标准差倍数 | `std`, `devfactor` | [0.5, 5.0] | `devfactor=2.0` → [1.0,4.0] |
+| 快速周期 | `fast`, `short` | [3, 50] | `fast_period=10` → [5,20] |
+| 慢速周期 | `slow`, `long` | [10, 200] | `slow_period=30` → [15,75] |
+| RSI阈值 | `rsi.*sold`, `rsi.*bought` | [10, 90] | `rsi_oversold=30` → [21,39] |
+
+**优势：**
+- 🎯 根据参数语义设置合理范围
+- ⚡ 避免盲目搜索，提升效率
+- 📊 自动处理参数约束（如 fast < slow）
+- 💡 优化后提供参数空间改进建议
+
+**详细文档：** 参见 [参数空间优化指南.md](参数空间优化指南.md)
 
 ---
 
@@ -571,49 +425,49 @@ python run_optimizer.py -d data.csv -s strategy.py
 
 ---
 
-## 🎓 示例工作流
-
-### 完整的策略优化流程
+## 🎓 典型工作流
 
 ```bash
-# 1. 准备环境
-conda activate quant
+# 1. 快速测试（确认可运行）
+python run_optimizer.py -d data.csv -s strategy.py --trials 20
 
-# 2. 快速测试（10次试验）
-python run_optimizer.py \
-  -d project_trend/data/BTC.csv \
-  -s project_trend/src/Aberration.py \
-  --trials 10
+# 2. 创建参数文件（只优化关键参数）
+echo "period" > params.txt
+echo "devfactor" >> params.txt
 
-# 3. 如果结果合理，增加试验次数
-python run_optimizer.py \
-  -d project_trend/data/BTC.csv \
-  -s project_trend/src/Aberration.py \
-  --trials 100 \
-  --output ./results/btc_aberration
+# 3. 正式优化
+python run_optimizer.py -d data.csv -s strategy.py --params-file params.txt --trials 100
 
-# 4. 尝试其他优化目标
-python run_optimizer.py \
-  -d project_trend/data/BTC.csv \
-  -s project_trend/src/Aberration.py \
-  --objective annual_return \
-  --trials 100 \
-  --output ./results/btc_aberration_return
+# 4. 查看结果和建议
+cat optimization_results/optimization_summary.txt
 
-# 5. 使用LLM进行深度分析
-python run_optimizer.py \
-  -d project_trend/data/BTC.csv \
-  -s project_trend/src/Aberration.py \
-  --use-llm \
-  --trials 100 \
-  --output ./results/btc_aberration_llm
-
-# 6. 比较结果
-ls -lh results/*/optimization_*.json
+# 5. 如有参数在边界，调整后重新优化
+# （根据建议修改参数空间或重点优化特定参数）
 ```
+
+**更多示例：** 参见 [QUICK_START.md](QUICK_START.md)
+
+---
+
+## 🆕 版本更新
+
+### v1.1.0 (2026-01-22)
+
+**新增功能：**
+- ✨ 指定参数优化功能（`--params-file`）
+- ✨ 智能参数空间自动生成
+- ✨ 参数空间使用情况分析
+- ✨ 参数约束自动处理（如 fast < slow）
+- 📊 优化后自动提供参数空间改进建议
+
+**改进：**
+- 🚀 根据参数类型智能设置搜索范围
+- 📈 提升优化效率，减少无效搜索
+- 💡 新增参数敏感性分析示例
+- 📖 完善文档和使用示例
 
 ---
 
 **更新时间**: 2026-01-22  
-**版本**: 1.0.0  
+**版本**: 1.1.0  
 **作者**: Peter
