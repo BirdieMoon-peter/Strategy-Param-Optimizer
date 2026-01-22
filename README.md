@@ -816,30 +816,6 @@ rsi_oversold < rsi_overbought
 
 ---
 
-## 🎓 典型工作流
-
-```bash
-# 1. 快速测试（确认可运行）
-python run_optimizer.py -d data.csv -s strategy.py --trials 20
-
-# 2. 创建参数文件（只优化关键参数）
-echo "period" > params.txt
-echo "devfactor" >> params.txt
-
-# 3. 正式优化
-python run_optimizer.py -d data.csv -s strategy.py --params-file params.txt --trials 100
-
-# 4. 查看结果和建议
-cat optimization_results/optimization_summary.txt
-
-# 5. 如有参数在边界，调整后重新优化
-# （根据建议修改参数空间或重点优化特定参数）
-```
-
-**更多示例：** 参见 [QUICK_START.md](QUICK_START.md)
-
----
-
 ## 🆕 版本更新
 
 ### v1.1.0 (2026-01-22)
