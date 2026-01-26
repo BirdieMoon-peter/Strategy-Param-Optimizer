@@ -1,13 +1,13 @@
 # -*- coding: utf-8 -*-
 """
 回测引擎模块
-封装backtrader回测逻辑，提供统一的性能评估接口
+封装backtrader回测逻辑，使用empyrical/pyfolio计算性能指标
 """
 
 import os
 import sys
 import warnings
-from typing import Dict, Any, Optional, Type, Tuple
+from typing import Dict, Any, Optional, Type, Tuple, List
 from dataclasses import dataclass, field
 import pandas as pd
 import numpy as np
@@ -22,10 +22,81 @@ import matplotlib.pyplot as plt
 
 import backtrader as bt
 
+# 性能指标计算 (使用 empyrical 替代 backtrader analyzers)
+try:
+    import empyrical as ep
+    EMPYRICAL_AVAILABLE = True
+except ImportError:
+    EMPYRICAL_AVAILABLE = False
+    print("[警告] empyrical 未安装，将使用 backtrader 内置分析器")
+
 # 添加项目根目录到路径
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from config import BacktestConfig, DEFAULT_BACKTEST_CONFIG
+
+
+class PortfolioValueAnalyzer(bt.Analyzer):
+    """
+    自定义分析器：记录每日收盘时的投资组合价值
+    用于后续使用 empyrical 计算性能指标
+    """
+    
+    def __init__(self):
+        self.portfolio_values = []
+        self.dates = []
+    
+    def next(self):
+        # 记录当前日期和投资组合价值
+        current_date = self.datas[0].datetime.date(0)
+        current_value = self.strategy.broker.getvalue()
+        
+        # 只在新的一天记录（避免重复）
+        if not self.dates or self.dates[-1] != current_date:
+            self.dates.append(current_date)
+            self.portfolio_values.append(current_value)
+    
+    def get_analysis(self):
+        return {
+            'dates': self.dates,
+            'portfolio_values': self.portfolio_values
+        }
+
+
+class TradeRecorder(bt.Analyzer):
+    """
+    自定义分析器：记录交易信息
+    """
+    
+    def __init__(self):
+        self.trades = []
+        self.total_trades = 0
+        self.won_trades = 0
+        self.lost_trades = 0
+    
+    def notify_trade(self, trade):
+        if trade.isclosed:
+            self.total_trades += 1
+            if trade.pnl > 0:
+                self.won_trades += 1
+            elif trade.pnl < 0:
+                self.lost_trades += 1
+            
+            self.trades.append({
+                'pnl': trade.pnl,
+                'pnlcomm': trade.pnlcomm,
+                'size': trade.size,
+                'price': trade.price,
+                'value': trade.value,
+            })
+    
+    def get_analysis(self):
+        return {
+            'total': self.total_trades,
+            'won': self.won_trades,
+            'lost': self.lost_trades,
+            'trades': self.trades
+        }
 
 
 @dataclass
@@ -54,6 +125,8 @@ class BacktestEngine:
         self, 
         config: BacktestConfig = None,
         data: pd.DataFrame = None,
+        data_list: List[pd.DataFrame] = None,
+        data_names: List[str] = None,
         strategy_class: Type[bt.Strategy] = None,
         initial_cash: float = None,
         commission: float = None
@@ -63,7 +136,9 @@ class BacktestEngine:
         
         Args:
             config: 回测配置
-            data: DataFrame格式的数据（新接口）
+            data: DataFrame格式的数据（单数据源）
+            data_list: 多个DataFrame格式的数据列表（多数据源）
+            data_names: 数据源名称列表，与data_list对应
             strategy_class: 策略类（新接口）
             initial_cash: 初始资金（新接口）
             commission: 手续费率（新接口）
@@ -72,10 +147,28 @@ class BacktestEngine:
         self.data_cache = {}
         
         # 新接口支持
-        self.data_df = data
+        if data is not None and data_list is not None:
+            raise ValueError("data 和 data_list 不能同时提供")
+        
+        if data is not None:
+            self.data_df = data
+            self.data_list = [data]
+            self.data_names = ["ASSET"]
+            self.is_multi_data = False
+        elif data_list is not None:
+            self.data_df = None
+            self.data_list = data_list
+            self.data_names = data_names or [f"ASSET{i}" for i in range(len(data_list))]
+            self.is_multi_data = len(data_list) > 1
+        else:
+            self.data_df = None
+            self.data_list = None
+            self.data_names = None
+            self.is_multi_data = False
+        
         self.strategy_class = strategy_class
         if initial_cash is not None:
-            self.config.cash = initial_cash
+            self.config.initial_cash = initial_cash
         if commission is not None:
             self.config.commission = commission
     
@@ -146,6 +239,8 @@ class BacktestEngine:
         self,
         strategy_class: Type[bt.Strategy] = None,
         data: pd.DataFrame = None,
+        data_list: List[pd.DataFrame] = None,
+        data_names: List[str] = None,
         params: Dict[str, Any] = None,
         asset_name: str = "ASSET",
         calculate_yearly: bool = True
@@ -155,9 +250,11 @@ class BacktestEngine:
         
         Args:
             strategy_class: 策略类（可选，如果未提供则使用初始化时的策略）
-            data: 行情数据（可选，如果未提供则使用初始化时的数据）
+            data: 行情数据（可选，单数据源，如果未提供则使用初始化时的数据）
+            data_list: 多个行情数据列表（可选，多数据源）
+            data_names: 数据源名称列表，与data_list对应
             params: 策略参数
-            asset_name: 资产名称
+            asset_name: 资产名称（仅用于单数据源）
             calculate_yearly: 是否计算每年的指标
             
         Returns:
@@ -165,12 +262,25 @@ class BacktestEngine:
         """
         # 使用提供的参数或初始化时的参数
         strategy_class = strategy_class or self.strategy_class
-        data = data if data is not None else self.data_df
+        
+        # 确定使用单数据源还是多数据源
+        if data is not None:
+            use_data_list = [data]
+            use_data_names = [asset_name]
+        elif data_list is not None:
+            use_data_list = data_list
+            use_data_names = data_names or [f"ASSET{i}" for i in range(len(data_list))]
+        elif self.data_list is not None:
+            use_data_list = self.data_list
+            use_data_names = self.data_names
+        elif self.data_df is not None:
+            use_data_list = [self.data_df]
+            use_data_names = [asset_name]
+        else:
+            raise ValueError("必须提供 data/data_list 参数或在初始化时指定")
         
         if strategy_class is None:
             raise ValueError("必须提供 strategy_class 参数或在初始化时指定")
-        if data is None:
-            raise ValueError("必须提供 data 参数或在初始化时指定")
         
         params = params or {}
         
@@ -180,53 +290,68 @@ class BacktestEngine:
             cerebro.broker.setcash(self.config.initial_cash)
             cerebro.broker.setcommission(commission=self.config.commission)
             
-            # 准备数据：确保 datetime 是索引
-            data_copy = data.copy()
-            if 'datetime' in data_copy.columns:
-                data_copy['datetime'] = pd.to_datetime(data_copy['datetime'])
-                data_copy = data_copy.set_index('datetime')
-            elif 'date' in data_copy.columns:
-                data_copy['date'] = pd.to_datetime(data_copy['date'])
-                data_copy = data_copy.set_index('date')
-            
-            # 确保列名小写
-            data_copy.columns = [col.lower() for col in data_copy.columns]
-            
-            # 添加数据
-            bt_data = bt.feeds.PandasData(dataname=data_copy, name=asset_name)
-            cerebro.adddata(bt_data)
+            # 添加所有数据源
+            for i, (data_df, data_name) in enumerate(zip(use_data_list, use_data_names)):
+                # 准备数据：确保 datetime 是索引
+                data_copy = data_df.copy()
+                if 'datetime' in data_copy.columns:
+                    data_copy['datetime'] = pd.to_datetime(data_copy['datetime'])
+                    data_copy = data_copy.set_index('datetime')
+                elif 'date' in data_copy.columns:
+                    data_copy['date'] = pd.to_datetime(data_copy['date'])
+                    data_copy = data_copy.set_index('date')
+                
+                # 确保列名小写
+                data_copy.columns = [col.lower() for col in data_copy.columns]
+                
+                # 添加数据
+                bt_data = bt.feeds.PandasData(dataname=data_copy, name=data_name)
+                cerebro.adddata(bt_data)
             
             # 添加策略
             cerebro.addstrategy(strategy_class, **params)
             
-            # 添加分析器
-            cerebro.addanalyzer(bt.analyzers.Returns, _name='returns')
-            cerebro.addanalyzer(bt.analyzers.DrawDown, _name='drawdown')
-            cerebro.addanalyzer(bt.analyzers.SharpeRatio, _name='sharpe', 
-                              riskfreerate=0.0, annualize=True)
-            cerebro.addanalyzer(bt.analyzers.TradeAnalyzer, _name='trades')
-            cerebro.addanalyzer(bt.analyzers.TimeReturn, _name='timereturn')
+            # 添加自定义分析器（用于 empyrical 计算）
+            cerebro.addanalyzer(PortfolioValueAnalyzer, _name='portfolio')
+            cerebro.addanalyzer(TradeRecorder, _name='trades')
             
             # 运行回测
             results = cerebro.run()
             strat = results[0]
             
-            # 提取结果
-            ret = strat.analyzers.returns.get_analysis()
-            dd = strat.analyzers.drawdown.get_analysis()
-            sharpe = strat.analyzers.sharpe.get_analysis()
-            trades = strat.analyzers.trades.get_analysis()
+            # 提取投资组合价值序列
+            portfolio_analysis = strat.analyzers.portfolio.get_analysis()
+            trade_analysis = strat.analyzers.trades.get_analysis()
             
-            # 计算指标
-            total_return = (np.exp(ret.get('rtot', 0)) - 1) * 100
-            annual_return = ret.get('rnorm100', 0)
-            max_drawdown = dd.max.drawdown if dd.max.drawdown else 0
-            sharpe_ratio = sharpe.get('sharperatio', 0) or 0
+            dates = portfolio_analysis['dates']
+            portfolio_values = portfolio_analysis['portfolio_values']
             final_value = cerebro.broker.getvalue()
             
+            # 使用 empyrical 计算指标
+            if EMPYRICAL_AVAILABLE and len(portfolio_values) > 1:
+                # 计算日收益率序列
+                returns_series = self._calculate_returns_from_portfolio(dates, portfolio_values)
+                
+                # 使用 empyrical 计算指标
+                total_return = ep.cum_returns_final(returns_series) * 100
+                annual_return = ep.annual_return(returns_series) * 100
+                max_drawdown = ep.max_drawdown(returns_series) * 100  # empyrical 返回负值
+                max_drawdown = abs(max_drawdown)  # 转为正值
+                sharpe_ratio = ep.sharpe_ratio(returns_series, risk_free=0.0, annualization=252)
+                
+                # 处理无效值
+                if np.isnan(sharpe_ratio) or np.isinf(sharpe_ratio):
+                    sharpe_ratio = 0.0
+            else:
+                # 回退到简单计算
+                total_return = ((final_value / self.config.initial_cash) - 1) * 100
+                annual_return = self._simple_annual_return(dates, total_return)
+                max_drawdown = self._simple_max_drawdown(portfolio_values)
+                sharpe_ratio = self._simple_sharpe_ratio(portfolio_values)
+            
             # 交易统计
-            total_trades = trades.get('total', {}).get('total', 0)
-            won_trades = trades.get('won', {}).get('total', 0)
+            total_trades = trade_analysis['total']
+            won_trades = trade_analysis['won']
             win_rate = (won_trades / total_trades * 100) if total_trades > 0 else 0
             
             # 计算每年的指标
@@ -234,8 +359,9 @@ class BacktestEngine:
             yearly_drawdowns = {}
             yearly_sharpe = {}
             
-            if calculate_yearly:
-                yearly_stats = self._calculate_yearly_metrics(data, strategy_class, params, asset_name)
+            if calculate_yearly and len(use_data_list) == 1 and EMPYRICAL_AVAILABLE:
+                # 使用 empyrical 计算逐年指标
+                yearly_stats = self._calculate_yearly_metrics_empyrical(dates, portfolio_values)
                 yearly_returns = yearly_stats.get('returns', {})
                 yearly_drawdowns = yearly_stats.get('drawdowns', {})
                 yearly_sharpe = yearly_stats.get('sharpe', {})
@@ -260,6 +386,160 @@ class BacktestEngine:
             traceback.print_exc()
             return None
     
+    def _calculate_returns_from_portfolio(
+        self,
+        dates: List,
+        portfolio_values: List[float]
+    ) -> pd.Series:
+        """
+        从投资组合价值序列计算日收益率序列
+        
+        Args:
+            dates: 日期列表
+            portfolio_values: 投资组合价值列表
+            
+        Returns:
+            日收益率 Series (用于 empyrical)
+        """
+        if len(portfolio_values) < 2:
+            return pd.Series(dtype=float)
+        
+        # 创建 DataFrame
+        df = pd.DataFrame({
+            'date': pd.to_datetime(dates),
+            'value': portfolio_values
+        })
+        df = df.set_index('date')
+        
+        # 计算日收益率
+        df['returns'] = df['value'].pct_change()
+        
+        # 移除第一行 NaN
+        returns = df['returns'].dropna()
+        
+        return returns
+    
+    def _calculate_yearly_metrics_empyrical(
+        self,
+        dates: List,
+        portfolio_values: List[float]
+    ) -> Dict[str, Dict[int, float]]:
+        """
+        使用 empyrical 计算每年的性能指标
+        
+        Args:
+            dates: 日期列表
+            portfolio_values: 投资组合价值列表
+            
+        Returns:
+            包含每年收益率、回撤和夏普比率的字典
+        """
+        yearly_returns = {}
+        yearly_drawdowns = {}
+        yearly_sharpe = {}
+        
+        if len(dates) < 2:
+            return {'returns': {}, 'drawdowns': {}, 'sharpe': {}}
+        
+        # 创建 DataFrame
+        df = pd.DataFrame({
+            'date': pd.to_datetime(dates),
+            'value': portfolio_values
+        })
+        df = df.set_index('date')
+        df['returns'] = df['value'].pct_change()
+        
+        # 获取所有年份
+        years = sorted(df.index.year.unique())
+        
+        for year in years:
+            # 筛选该年的数据
+            year_data = df[df.index.year == year]
+            year_returns = year_data['returns'].dropna()
+            
+            # 如果数据太少，跳过
+            if len(year_returns) < 5:
+                continue
+            
+            try:
+                # 使用 empyrical 计算指标
+                year_return = ep.cum_returns_final(year_returns) * 100
+                year_drawdown = abs(ep.max_drawdown(year_returns) * 100)
+                year_sharpe_ratio = ep.sharpe_ratio(year_returns, risk_free=0.0, annualization=252)
+                
+                # 处理无效值
+                if np.isnan(year_sharpe_ratio) or np.isinf(year_sharpe_ratio):
+                    year_sharpe_ratio = 0.0
+                if np.isnan(year_return):
+                    year_return = 0.0
+                if np.isnan(year_drawdown):
+                    year_drawdown = 0.0
+                
+                yearly_returns[year] = year_return
+                yearly_drawdowns[year] = year_drawdown
+                yearly_sharpe[year] = year_sharpe_ratio
+                
+            except Exception:
+                yearly_returns[year] = 0.0
+                yearly_drawdowns[year] = 0.0
+                yearly_sharpe[year] = 0.0
+        
+        return {
+            'returns': yearly_returns,
+            'drawdowns': yearly_drawdowns,
+            'sharpe': yearly_sharpe
+        }
+    
+    def _simple_annual_return(self, dates: List, total_return: float) -> float:
+        """简单年化收益率计算（当 empyrical 不可用时）"""
+        if len(dates) < 2:
+            return 0.0
+        
+        start_date = pd.to_datetime(dates[0])
+        end_date = pd.to_datetime(dates[-1])
+        years = (end_date - start_date).days / 365.25
+        
+        if years <= 0:
+            return total_return
+        
+        # 年化: (1 + total_return/100)^(1/years) - 1
+        try:
+            annual = ((1 + total_return / 100) ** (1 / years) - 1) * 100
+            return annual if not np.isnan(annual) else 0.0
+        except:
+            return 0.0
+    
+    def _simple_max_drawdown(self, portfolio_values: List[float]) -> float:
+        """简单最大回撤计算（当 empyrical 不可用时）"""
+        if len(portfolio_values) < 2:
+            return 0.0
+        
+        values = np.array(portfolio_values)
+        peak = np.maximum.accumulate(values)
+        drawdown = (values - peak) / peak
+        max_dd = np.min(drawdown) * 100
+        
+        return abs(max_dd) if not np.isnan(max_dd) else 0.0
+    
+    def _simple_sharpe_ratio(self, portfolio_values: List[float]) -> float:
+        """简单夏普比率计算（当 empyrical 不可用时）"""
+        if len(portfolio_values) < 10:
+            return 0.0
+        
+        values = np.array(portfolio_values)
+        returns = np.diff(values) / values[:-1]
+        
+        mean_return = np.mean(returns)
+        std_return = np.std(returns)
+        
+        if std_return == 0 or np.isnan(std_return):
+            return 0.0
+        
+        # 年化夏普比率
+        sharpe = (mean_return / std_return) * np.sqrt(252)
+        
+        return sharpe if not np.isnan(sharpe) and not np.isinf(sharpe) else 0.0
+    
     def _calculate_yearly_metrics(
         self,
         data: pd.DataFrame,
@@ -268,7 +548,8 @@ class BacktestEngine:
         asset_name: str
     ) -> Dict[str, Dict[int, float]]:
         """
-        计算每年的性能指标
+        计算每年的性能指标（保留旧方法作为备用）
+        当 empyrical 不可用时使用此方法
         
         Args:
             data: 行情数据
@@ -292,22 +573,17 @@ class BacktestEngine:
             data_copy['date'] = pd.to_datetime(data_copy['date'])
             data_copy = data_copy.set_index('date')
         elif not isinstance(data_copy.index, pd.DatetimeIndex):
-            # 如果没有日期列且索引不是日期，返回空字典
             return {'returns': {}, 'drawdowns': {}, 'sharpe': {}}
         
-        # 获取所有年份
         years = sorted(data_copy.index.year.unique())
         
         for year in years:
-            # 筛选该年的数据
             year_data = data_copy[data_copy.index.year == year]
             
-            # 如果数据太少，跳过
             if len(year_data) < 20:
                 continue
             
             try:
-                # 为该年运行回测
                 cerebro = bt.Cerebro(stdstats=True)
                 cerebro.broker.setcash(self.config.initial_cash)
                 cerebro.broker.setcommission(commission=self.config.commission)
@@ -316,64 +592,29 @@ class BacktestEngine:
                 cerebro.adddata(bt_data)
                 cerebro.addstrategy(strategy_class, **params)
                 
-                # 添加分析器
-                cerebro.addanalyzer(bt.analyzers.Returns, _name='returns')
-                cerebro.addanalyzer(bt.analyzers.DrawDown, _name='drawdown')
-                cerebro.addanalyzer(bt.analyzers.SharpeRatio, _name='sharpe',
-                                  riskfreerate=0.0, annualize=True)
-                cerebro.addanalyzer(bt.analyzers.TimeReturn, _name='timereturn')
+                # 使用自定义分析器
+                cerebro.addanalyzer(PortfolioValueAnalyzer, _name='portfolio')
                 
-                # 运行回测
                 results = cerebro.run()
                 strat = results[0]
                 
-                # 提取结果
-                ret = strat.analyzers.returns.get_analysis()
-                dd = strat.analyzers.drawdown.get_analysis()
-                sharpe = strat.analyzers.sharpe.get_analysis()
-                timereturn = strat.analyzers.timereturn.get_analysis()
+                portfolio_analysis = strat.analyzers.portfolio.get_analysis()
+                pv = portfolio_analysis['portfolio_values']
                 
-                # 计算该年的指标
-                # 使用 rtot (总对数收益率) 转换为百分比收益
-                year_return = (np.exp(ret.get('rtot', 0)) - 1) * 100
-                year_drawdown = dd.max.drawdown if dd.max.drawdown else 0
-                
-                # 计算年度夏普比率
-                year_sharpe_ratio = sharpe.get('sharperatio', None)
-                
-                # 如果SharpeRatio分析器无法计算或为0，使用日收益率手动计算
-                if year_sharpe_ratio is None or year_sharpe_ratio == 0 or np.isnan(year_sharpe_ratio):
-                    # 使用TimeReturn计算日收益率，然后手动计算夏普比率
-                    if timereturn and isinstance(timereturn, dict) and len(timereturn) > 1:
-                        # TimeReturn返回字典，键是日期，值是收益率
-                        daily_returns_list = [v for v in timereturn.values() if v is not None and not np.isnan(v)]
-                        if len(daily_returns_list) > 1:
-                            daily_returns_array = np.array(daily_returns_list)
-                            mean_return = np.mean(daily_returns_array)
-                            std_return = np.std(daily_returns_array)
-                            if std_return > 0 and not np.isnan(std_return):
-                                # 年化夏普比率 = (平均日收益率 / 日收益率标准差) * sqrt(252)
-                                year_sharpe_ratio = (mean_return / std_return) * np.sqrt(252)
-                                # 检查结果是否有效
-                                if np.isnan(year_sharpe_ratio) or np.isinf(year_sharpe_ratio):
-                                    year_sharpe_ratio = 0
-                            else:
-                                year_sharpe_ratio = 0
-                        else:
-                            year_sharpe_ratio = 0
-                    else:
-                        year_sharpe_ratio = 0
-                
-                # 确保返回有效值
-                if year_sharpe_ratio is None or np.isnan(year_sharpe_ratio) or np.isinf(year_sharpe_ratio):
+                if len(pv) > 1:
+                    year_return = ((pv[-1] / pv[0]) - 1) * 100
+                    year_drawdown = self._simple_max_drawdown(pv)
+                    year_sharpe_ratio = self._simple_sharpe_ratio(pv)
+                else:
+                    year_return = 0
+                    year_drawdown = 0
                     year_sharpe_ratio = 0
                 
                 yearly_returns[year] = year_return
                 yearly_drawdowns[year] = year_drawdown
                 yearly_sharpe[year] = year_sharpe_ratio
                 
-            except Exception as e:
-                # 如果该年回测失败，记录空值
+            except Exception:
                 yearly_returns[year] = 0
                 yearly_drawdowns[year] = 0
                 yearly_sharpe[year] = 0

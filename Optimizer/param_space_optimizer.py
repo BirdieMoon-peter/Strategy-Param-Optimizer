@@ -263,13 +263,40 @@ class ParamSpaceOptimizer:
         else:
             # 使用默认规则（更保守的范围）
             if param.param_type == "int":
-                min_val = max(1, int(param.default_value * 0.5))
-                max_val = int(param.default_value * 2)
+                default_int = int(param.default_value)
+                if default_int == 0:
+                    # 特殊处理：默认值为0时，使用固定范围
+                    min_val = 0
+                    max_val = 2
+                elif default_int == 1:
+                    # 特殊处理：默认值为1时
+                    min_val = 1
+                    max_val = 3
+                else:
+                    min_val = max(1, int(param.default_value * 0.5))
+                    max_val = int(param.default_value * 2)
                 step = 1
             else:
-                min_val = max(0.0001, param.default_value * 0.5)
-                max_val = param.default_value * 2
+                default_float = float(param.default_value)
+                if default_float == 0:
+                    # 特殊处理：默认值为0时
+                    min_val = 0.0
+                    max_val = 0.1
+                elif default_float < 0.001:
+                    # 极小值处理
+                    min_val = default_float * 0.5 if default_float > 0 else 0.0
+                    max_val = max(default_float * 2, 0.01)
+                else:
+                    min_val = max(0.0001, param.default_value * 0.5)
+                    max_val = param.default_value * 2
                 step = None
+            
+            # 确保 min < max
+            if min_val >= max_val:
+                if param.param_type == "int":
+                    max_val = min_val + 2
+                else:
+                    max_val = min_val + 0.1
             
             optimized = StrategyParam(
                 name=param.name,

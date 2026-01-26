@@ -99,25 +99,35 @@ def load_space_config(config_file: str) -> dict:
     return param_space
 
 
-def prepare_data(data_path: str) -> str:
+def prepare_data(data_path: str, data_name: str = None) -> tuple:
     """
     准备数据文件：确保有 datetime 列
     
     Args:
         data_path: 原始数据文件路径
+        data_name: 数据源名称，如果不提供则使用文件名
         
     Returns:
-        处理后的数据文件路径
+        (处理后的数据文件路径, 数据源名称) 元组
     """
     df = pd.read_csv(data_path)
     
-    # 检查并重命名日期列
-    if 'date' in df.columns and 'datetime' not in df.columns:
-        df.rename(columns={'date': 'datetime'}, inplace=True)
-        print(f"[数据] 已将 'date' 列重命名为 'datetime'")
-    
+    # 检查并重命名日期列（支持多种常见列名）
     if 'datetime' not in df.columns:
-        raise ValueError("数据文件必须包含 'datetime' 或 'date' 列")
+        if 'date' in df.columns:
+            df.rename(columns={'date': 'datetime'}, inplace=True)
+            print(f"[数据] 已将 'date' 列重命名为 'datetime'")
+        elif 'time_key' in df.columns:
+            df.rename(columns={'time_key': 'datetime'}, inplace=True)
+            print(f"[数据] 已将 'time_key' 列重命名为 'datetime'")
+        elif 'Datetime' in df.columns:
+            df.rename(columns={'Datetime': 'datetime'}, inplace=True)
+            print(f"[数据] 已将 'Datetime' 列重命名为 'datetime'")
+        elif 'timestamp' in df.columns:
+            df.rename(columns={'timestamp': 'datetime'}, inplace=True)
+            print(f"[数据] 已将 'timestamp' 列重命名为 'datetime'")
+        else:
+            raise ValueError("数据文件必须包含 'datetime', 'date', 'time_key' 或 'timestamp' 列")
     
     # 转换日期格式
     df['datetime'] = pd.to_datetime(df['datetime'])
@@ -128,10 +138,14 @@ def prepare_data(data_path: str) -> str:
     processed_path = data_dir / f"{asset_name}_processed.csv"
     df.to_csv(processed_path, index=False)
     
+    # 确定数据源名称
+    if data_name is None:
+        data_name = asset_name.replace('_processed', '')
+    
     print(f"[数据] 处理完成: {len(df)} 条记录")
     print(f"[数据] 时间范围: {df['datetime'].min()} 至 {df['datetime'].max()}")
     
-    return str(processed_path)
+    return str(processed_path), data_name
 
 
 def create_llm_config(args) -> UniversalLLMConfig:
@@ -272,7 +286,13 @@ def main():
     parser.add_argument(
         "--data", "-d",
         required=True,
-        help="标的数据CSV文件路径（必须包含 datetime/date, open, high, low, close, volume 列）"
+        action='append',
+        help="标的数据CSV文件路径（必须包含 datetime/date, open, high, low, close, volume 列）。支持多次指定以加载多个数据源，例如: -d data1.csv -d data2.csv"
+    )
+    parser.add_argument(
+        "--data-names", "-n",
+        action='append',
+        help="数据源名称，与--data一一对应。例如: -n QQQ -n TQQQ。如果不指定，将使用文件名作为数据源名称"
     )
     parser.add_argument(
         "--strategy", "-s",
@@ -353,12 +373,18 @@ def main():
     args = parser.parse_args()
     
     # 验证文件存在
-    if not Path(args.data).exists():
-        print(f"❌ 错误: 数据文件不存在: {args.data}")
-        return 1
+    for data_path in args.data:
+        if not Path(data_path).exists():
+            print(f"❌ 错误: 数据文件不存在: {data_path}")
+            return 1
     
     if not Path(args.strategy).exists():
         print(f"❌ 错误: 策略文件不存在: {args.strategy}")
+        return 1
+    
+    # 验证数据源名称数量
+    if args.data_names and len(args.data_names) != len(args.data):
+        print(f"❌ 错误: --data-names 的数量({len(args.data_names)})必须与 --data 的数量({len(args.data)})一致")
         return 1
     
     # 加载目标参数列表（如果指定了参数文件）
@@ -391,7 +417,13 @@ def main():
         print("\n" + "="*60)
         print("通用策略优化器")
         print("="*60)
-        print(f"数据文件: {args.data}")
+        if len(args.data) == 1:
+            print(f"数据文件: {args.data[0]}")
+        else:
+            print(f"数据文件: {len(args.data)} 个数据源")
+            for i, dp in enumerate(args.data):
+                name = args.data_names[i] if args.data_names else Path(dp).stem
+                print(f"  [{i}] {name}: {dp}")
         print(f"策略文件: {args.strategy}")
         print(f"优化目标: {args.objective}")
         print(f"试验次数: {args.trials}")
@@ -411,7 +443,18 @@ def main():
     
     try:
         # 1. 准备数据
-        data_path = prepare_data(args.data)
+        data_paths = []
+        data_names = []
+        for i, data_file in enumerate(args.data):
+            # 获取数据源名称
+            data_name = None
+            if args.data_names and i < len(args.data_names):
+                data_name = args.data_names[i]
+            
+            # 处理数据
+            processed_path, final_name = prepare_data(data_file, data_name)
+            data_paths.append(processed_path)
+            data_names.append(final_name)
         
         # 2. 配置LLM（如果需要）
         llm_config = None
@@ -432,24 +475,37 @@ def main():
         output_dir = Path(args.output)
         output_dir.mkdir(parents=True, exist_ok=True)
         
-        # 提取原始资产名称（去除 _processed 后缀）
-        original_asset_name = Path(args.data).stem.replace('_processed', '')
-        
         # 4. 创建优化器
         if not args.quiet:
             print("\n[优化器] 初始化中...")
         
-        optimizer = UniversalOptimizer(
-            data_path=data_path,
-            strategy_path=str(Path(args.strategy).absolute()),
-            objective=args.objective,
-            use_llm=args.use_llm,
-            llm_config=llm_config,
-            output_dir=str(output_dir),
-            verbose=not args.quiet,
-            target_params=target_params,
-            custom_space=custom_space
-        )
+        # 如果只有一个数据源，使用原来的单数据接口
+        if len(data_paths) == 1:
+            optimizer = UniversalOptimizer(
+                data_path=data_paths[0],
+                strategy_path=str(Path(args.strategy).absolute()),
+                objective=args.objective,
+                use_llm=args.use_llm,
+                llm_config=llm_config,
+                output_dir=str(output_dir),
+                verbose=not args.quiet,
+                target_params=target_params,
+                custom_space=custom_space
+            )
+        else:
+            # 多数据源接口
+            optimizer = UniversalOptimizer(
+                data_paths=data_paths,
+                data_names=data_names,
+                strategy_path=str(Path(args.strategy).absolute()),
+                objective=args.objective,
+                use_llm=args.use_llm,
+                llm_config=llm_config,
+                output_dir=str(output_dir),
+                verbose=not args.quiet,
+                target_params=target_params,
+                custom_space=custom_space
+            )
         
         # 5. 执行优化
         if not args.quiet:
@@ -459,7 +515,7 @@ def main():
         result = optimizer.optimize(n_trials=args.trials)
         
         # 6. 打印和保存结果
-        print_results(result, output_dir, original_asset_name)
+        print_results(result, output_dir)
         
         # 查找JSON文件
         json_files = list(output_dir.glob("optimization_*.json"))

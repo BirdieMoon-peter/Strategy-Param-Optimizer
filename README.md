@@ -7,10 +7,12 @@
 ### 核心特性
 
 ✅ **通用性强** - 支持任意CSV格式的标的数据和任意Backtrader策略  
+✅ **多数据源支持** - 🆕 支持多个CSV文件输入，适用于配对交易、跨市场套利等策略  
 ✅ **多目标优化** - 支持夏普比率、年化收益率、最大回撤等多种优化目标  
 ✅ **智能参数空间** - 🆕 自动根据参数类型生成合理的搜索范围，提升优化效率  
 ✅ **参数空间分析** - 🆕 自动分析优化结果，给出参数空间改进建议  
 ✅ **选择性优化** - 🆕 支持指定要优化的参数，其他参数保持默认值  
+✅ **专业性能指标** - 🆕 使用 empyrical 库计算标准化的性能指标  
 ✅ **LLM集成** - 可选集成大语言模型进行智能参数分析  
 ✅ **命令行友好** - 简单易用的命令行接口，支持批处理  
 ✅ **详细输出** - 生成JSON格式结果和可读的文本摘要
@@ -58,8 +60,28 @@ pip install -r requirements.txt
 
 | 参数 | 简写 | 说明 | 示例 |
 |------|------|------|------|
-| `--data` | `-d` | 标的数据CSV文件路径 | `project_trend/data/BTC.csv` |
+| `--data` | `-d` | 标的数据CSV文件路径（支持多次指定） | `-d data1.csv -d data2.csv` |
 | `--strategy` | `-s` | 策略脚本文件路径 | `project_trend/src/Aberration.py` |
+
+**多数据源支持 🆕**
+
+对于需要多个数据源的策略（如配对交易、跨市场套利等），可以多次使用 `-d` 参数指定多个CSV文件：
+
+```bash
+# 示例：使用QQQ和TQQQ两个数据源
+python run_optimizer.py \
+  -d data_1m_QQQ.csv \
+  -d data_1m_TQQQ.csv \
+  -n QQQ -n TQQQ \
+  -s multivwap2.py
+```
+
+| 参数 | 简写 | 说明 |
+|------|------|------|
+| `--data-names` | `-n` | 数据源名称，与`--data`一一对应（可选） |
+
+- 如果不指定 `--data-names`，系统会自动使用文件名作为数据源名称
+- 在策略中可以通过 `self.datas[0]`、`self.datas[1]` 等访问不同的数据源
 
 ### 优化参数
 
@@ -120,6 +142,40 @@ python run_optimizer.py -d data.csv -s strategy.py --objective annual_return
 # 5. 使用 LLM 辅助
 python run_optimizer.py -d data.csv -s strategy.py --use-llm
 ```
+
+### 多数据源策略优化 🆕
+
+对于需要多个数据源的策略（如配对交易、跨市场套利、杠杆ETF策略等），可以指定多个CSV文件：
+
+```bash
+# 示例1：QQQ + TQQQ 杠杆ETF策略
+python run_optimizer.py \
+  -d data_1m_QQQ.csv \
+  -d data_1m_TQQQ.csv \
+  -n QQQ -n TQQQ \
+  -s multivwap2.py \
+  --trials 100
+
+# 示例2：配对交易策略（不指定data-names，使用文件名）
+python run_optimizer.py \
+  -d gold.csv \
+  -d silver.csv \
+  -s pairs_trading.py
+
+# 示例3：多市场套利策略
+python run_optimizer.py \
+  -d btc_binance.csv \
+  -d btc_coinbase.csv \
+  -d btc_kraken.csv \
+  -n binance -n coinbase -n kraken \
+  -s arbitrage_strategy.py
+```
+
+**注意事项：**
+- 所有CSV文件必须包含相同的列（datetime, open, high, low, close, volume）
+- 数据源的顺序很重要，在策略中通过 `self.datas[0]`、`self.datas[1]` 等按顺序访问
+- 如果指定 `-n` 参数，数量必须与 `-d` 参数一致
+- 时间范围会自动对齐到所有数据源的交集
 
 ### 参数文件格式
 
@@ -818,6 +874,21 @@ rsi_oversold < rsi_overbought
 
 ## 🆕 版本更新
 
+### v2.1.0 (2026-01-25) 🆕
+
+**新增功能：**
+- ✨ **多数据源支持** - 支持多个CSV文件输入，适用于配对交易、跨市场套利等策略
+- ✨ 通过 `-d` 参数多次指定不同数据源
+- ✨ 可选的 `-n` 参数为每个数据源命名
+- ✨ 自动处理多数据源的回测引擎
+- ✨ **empyrical 集成** - 使用专业的 empyrical 库替代 backtrader 内置分析器计算性能指标
+
+**改进：**
+- 🚀 回测引擎支持同时加载多个数据feeds
+- 📊 优化器支持多数据源的策略优化
+- 📈 性能指标计算更准确、标准化（使用 empyrical）
+- 💡 新增多数据源使用示例和文档
+
 ### v1.1.0 (2026-01-22)
 
 **新增功能：**
@@ -835,6 +906,6 @@ rsi_oversold < rsi_overbought
 
 ---
 
-**更新时间**: 2026-01-22  
-**版本**: 1.1.0  
+**更新时间**: 2026-01-26  
+**版本**: 2.1.0  
 **作者**: Peter

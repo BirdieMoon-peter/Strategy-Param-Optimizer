@@ -8,6 +8,7 @@ import os
 import sys
 import json
 import pandas as pd
+import backtrader as bt
 import importlib.util
 import inspect
 from typing import Dict, List, Any, Optional, Type
@@ -43,8 +44,10 @@ class UniversalOptimizer:
     
     def __init__(
         self,
-        data_path: str,
-        strategy_path: str,
+        data_path: str = None,
+        data_paths: List[str] = None,
+        data_names: List[str] = None,
+        strategy_path: str = None,
         objective: str = "sharpe_ratio",
         use_llm: bool = False,
         llm_config: Optional[UniversalLLMConfig] = None,
@@ -57,7 +60,9 @@ class UniversalOptimizer:
         初始化优化器
         
         Args:
-            data_path: 标的数据CSV文件路径
+            data_path: 标的数据CSV文件路径（单数据源，与data_paths互斥）
+            data_paths: 多个数据CSV文件路径列表（多数据源，与data_path互斥）
+            data_names: 数据源名称列表，与data_paths对应
             strategy_path: 策略脚本文件路径（.py文件）
             objective: 优化目标（sharpe_ratio, annual_return, etc.）
             use_llm: 是否使用LLM
@@ -67,7 +72,25 @@ class UniversalOptimizer:
             target_params: 指定要优化的参数列表，为None时优化所有参数
             custom_space: 自定义参数空间配置，格式: {param_name: {min, max, step, distribution}}
         """
-        self.data_path = data_path
+        # 验证参数
+        if data_path is None and data_paths is None:
+            raise ValueError("必须提供 data_path 或 data_paths")
+        if data_path is not None and data_paths is not None:
+            raise ValueError("data_path 和 data_paths 不能同时提供")
+        
+        # 标准化为多数据源格式
+        if data_path is not None:
+            self.data_paths = [data_path]
+            self.data_names = [Path(data_path).stem.replace('_processed', '')]
+            self.is_multi_data = False
+        else:
+            self.data_paths = data_paths
+            if data_names is None:
+                self.data_names = [Path(p).stem.replace('_processed', '') for p in data_paths]
+            else:
+                self.data_names = data_names
+            self.is_multi_data = len(data_paths) > 1
+        
         self.strategy_path = strategy_path
         self.objective = objective
         self.use_llm = use_llm
@@ -83,10 +106,8 @@ class UniversalOptimizer:
         self.param_space_optimizer = ParamSpaceOptimizer(verbose=self.verbose)
         
         # 加载数据
-        self.data = self._load_data()
-        # 从文件名提取资产名称，去除 _processed 后缀
-        raw_asset_name = Path(data_path).stem
-        self.asset_name = raw_asset_name.replace('_processed', '')
+        self.data_list = self._load_data()
+        self.asset_name = self.data_names[0] if len(self.data_names) == 1 else "+".join(self.data_names)
         
         # 加载策略
         self.strategy_class, self.strategy_info = self._load_strategy()
@@ -101,46 +122,65 @@ class UniversalOptimizer:
                 print(f"[LLM] 初始化成功: {llm_config.api_type} - {llm_config.model_name}")
         
         # 初始化回测引擎
-        self.backtest_engine = BacktestEngine(
-            data=self.data,
-            strategy_class=self.strategy_class,
-            initial_cash=100000.0,
-            commission=0.001
-        )
+        if self.is_multi_data:
+            self.backtest_engine = BacktestEngine(
+                data_list=self.data_list,
+                data_names=self.data_names,
+                strategy_class=self.strategy_class,
+                initial_cash=100000.0,
+                commission=0.001
+            )
+        else:
+            self.backtest_engine = BacktestEngine(
+                data=self.data_list[0],
+                strategy_class=self.strategy_class,
+                initial_cash=100000.0,
+                commission=0.001
+            )
         
         if self.verbose:
             print(f"\n{'='*60}")
             print(f"通用策略优化器初始化完成")
             print(f"{'='*60}")
-            print(f"标的: {self.asset_name}")
+            if self.is_multi_data:
+                print(f"数据源数量: {len(self.data_names)}")
+                for i, name in enumerate(self.data_names):
+                    print(f"  [{i}] {name}: {len(self.data_list[i])} 数据点")
+            else:
+                print(f"标的: {self.asset_name}")
+                print(f"数据点数: {len(self.data_list[0])}")
             print(f"策略: {self.strategy_info['class_name']}")
             print(f"优化目标: {objective}")
             print(f"使用LLM: {'是' if use_llm else '否'}")
-            print(f"数据点数: {len(self.data)}")
             print(f"{'='*60}\n")
     
-    def _load_data(self) -> pd.DataFrame:
+    def _load_data(self) -> List[pd.DataFrame]:
         """加载标的数据"""
-        if not os.path.exists(self.data_path):
-            raise FileNotFoundError(f"数据文件不存在: {self.data_path}")
+        data_list = []
         
-        df = pd.read_csv(self.data_path)
+        for i, data_path in enumerate(self.data_paths):
+            if not os.path.exists(data_path):
+                raise FileNotFoundError(f"数据文件不存在: {data_path}")
+            
+            df = pd.read_csv(data_path)
+            
+            # 验证必需的列
+            required_columns = ['datetime', 'open', 'high', 'low', 'close', 'volume']
+            missing_columns = [col for col in required_columns if col not in df.columns]
+            
+            if missing_columns:
+                raise ValueError(f"数据文件 {data_path} 缺少必需的列: {missing_columns}")
+            
+            # 转换datetime列
+            df['datetime'] = pd.to_datetime(df['datetime'])
+            
+            if self.verbose:
+                print(f"[数据{i}] 成功加载: {self.data_names[i]} ({data_path})")
+                print(f"        时间范围: {df['datetime'].min()} 至 {df['datetime'].max()}")
+            
+            data_list.append(df)
         
-        # 验证必需的列
-        required_columns = ['datetime', 'open', 'high', 'low', 'close', 'volume']
-        missing_columns = [col for col in required_columns if col not in df.columns]
-        
-        if missing_columns:
-            raise ValueError(f"数据文件缺少必需的列: {missing_columns}")
-        
-        # 转换datetime列
-        df['datetime'] = pd.to_datetime(df['datetime'])
-        
-        if self.verbose:
-            print(f"[数据] 成功加载: {self.data_path}")
-            print(f"       时间范围: {df['datetime'].min()} 至 {df['datetime'].max()}")
-        
-        return df
+        return data_list
     
     def _load_strategy(self) -> tuple:
         """
@@ -160,10 +200,13 @@ class UniversalOptimizer:
         sys.modules[module_name] = module
         spec.loader.exec_module(module)
         
-        # 查找策略类（继承自backtrader.Strategy）
+        # 查找策略类（必须继承自backtrader.Strategy）
         strategy_classes = []
         for name, obj in inspect.getmembers(module):
-            if inspect.isclass(obj) and hasattr(obj, 'params') and obj.__module__ == module_name:
+            if (inspect.isclass(obj) and 
+                obj.__module__ == module_name and
+                issubclass(obj, bt.Strategy) and 
+                obj is not bt.Strategy):
                 strategy_classes.append(obj)
         
         if not strategy_classes:
@@ -327,16 +370,28 @@ class UniversalOptimizer:
             verbose=self.verbose
         )
         
-        # 调用优化方法
-        opt_result = optimizer.optimize_single_objective(
-            strategy_class=self.strategy_class,
-            strategy_name=self.strategy_info['class_name'],
-            data=self.data,
-            objective=self.objective,
-            search_space=search_space,
-            n_trials=n_trials,
-            verbose=self.verbose
-        )
+        # 调用优化方法（支持多数据源）
+        if self.is_multi_data:
+            opt_result = optimizer.optimize_single_objective(
+                strategy_class=self.strategy_class,
+                strategy_name=self.strategy_info['class_name'],
+                data_list=self.data_list,
+                data_names=self.data_names,
+                objective=self.objective,
+                search_space=search_space,
+                n_trials=n_trials,
+                verbose=self.verbose
+            )
+        else:
+            opt_result = optimizer.optimize_single_objective(
+                strategy_class=self.strategy_class,
+                strategy_name=self.strategy_info['class_name'],
+                data=self.data_list[0],
+                objective=self.objective,
+                search_space=search_space,
+                n_trials=n_trials,
+                verbose=self.verbose
+            )
         
         # 提取回测结果
         best_result = opt_result.backtest_result
@@ -448,6 +503,8 @@ class UniversalOptimizer:
     
     def _generate_result(self, best_result: BacktestResult) -> Dict[str, Any]:
         """生成完整的结果字典"""
+        # 获取数据范围（使用第一个数据源）
+        primary_data = self.data_list[0]
         result = {
             "optimization_info": {
                 "asset_name": self.asset_name,
@@ -455,9 +512,9 @@ class UniversalOptimizer:
                 "optimization_objective": self.objective,
                 "optimization_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 "data_range": {
-                    "start": self.data['datetime'].min().strftime("%Y-%m-%d"),
-                    "end": self.data['datetime'].max().strftime("%Y-%m-%d"),
-                    "total_days": len(self.data)
+                    "start": primary_data['datetime'].min().strftime("%Y-%m-%d"),
+                    "end": primary_data['datetime'].max().strftime("%Y-%m-%d"),
+                    "total_days": len(primary_data)
                 }
             },
             "best_parameters": best_result.params,
