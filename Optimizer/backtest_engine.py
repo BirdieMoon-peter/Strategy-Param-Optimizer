@@ -235,6 +235,59 @@ class BacktestEngine:
             print(f"[错误] 加载数据失败: {e}")
             return None
     
+    def _detect_data_timeframe(self, data_df: pd.DataFrame) -> Tuple[int, int]:
+        """
+        自动检测数据的时间频率
+        
+        Args:
+            data_df: 数据DataFrame（索引应为datetime）
+            
+        Returns:
+            (timeframe, compression) 元组
+            timeframe: bt.TimeFrame常量
+            compression: 压缩倍数
+        """
+        if data_df.index.dtype != 'datetime64[ns]':
+            # 如果索引不是datetime，尝试转换
+            try:
+                data_df.index = pd.to_datetime(data_df.index)
+            except:
+                # 无法转换，返回默认值（日线）
+                return bt.TimeFrame.Days, 1
+        
+        # 计算前100个数据点的时间间隔
+        sample_size = min(100, len(data_df))
+        if sample_size < 2:
+            return bt.TimeFrame.Days, 1
+        
+        time_deltas = data_df.index[1:sample_size] - data_df.index[0:sample_size-1]
+        median_delta = time_deltas.median()
+        
+        # 转换为分钟数
+        minutes = median_delta.total_seconds() / 60
+        
+        # 判断时间频率
+        if minutes < 1.5:  # 1分钟
+            return bt.TimeFrame.Minutes, 1
+        elif minutes < 3:  # 2分钟
+            return bt.TimeFrame.Minutes, 2
+        elif minutes < 7:  # 5分钟
+            return bt.TimeFrame.Minutes, 5
+        elif minutes < 20:  # 15分钟
+            return bt.TimeFrame.Minutes, 15
+        elif minutes < 45:  # 30分钟
+            return bt.TimeFrame.Minutes, 30
+        elif minutes < 90:  # 60分钟
+            return bt.TimeFrame.Minutes, 60
+        elif minutes < 60 * 6:  # 4小时
+            return bt.TimeFrame.Minutes, 240
+        elif minutes < 60 * 24 * 1.5:  # 日线
+            return bt.TimeFrame.Days, 1
+        elif minutes < 60 * 24 * 8:  # 周线
+            return bt.TimeFrame.Weeks, 1
+        else:  # 月线
+            return bt.TimeFrame.Months, 1
+    
     def run_backtest(
         self,
         strategy_class: Type[bt.Strategy] = None,
@@ -304,8 +357,16 @@ class BacktestEngine:
                 # 确保列名小写
                 data_copy.columns = [col.lower() for col in data_copy.columns]
                 
-                # 添加数据
-                bt_data = bt.feeds.PandasData(dataname=data_copy, name=data_name)
+                # 检测数据时间频率
+                timeframe, compression = self._detect_data_timeframe(data_copy)
+                
+                # 添加数据（显式指定 timeframe 和 compression 以确保多数据源时间对齐）
+                bt_data = bt.feeds.PandasData(
+                    dataname=data_copy,
+                    name=data_name,
+                    timeframe=timeframe,
+                    compression=compression
+                )
                 cerebro.adddata(bt_data)
             
             # 添加策略
@@ -588,7 +649,16 @@ class BacktestEngine:
                 cerebro.broker.setcash(self.config.initial_cash)
                 cerebro.broker.setcommission(commission=self.config.commission)
                 
-                bt_data = bt.feeds.PandasData(dataname=year_data, name=asset_name)
+                # 检测数据时间频率
+                timeframe, compression = self._detect_data_timeframe(year_data)
+                
+                # 添加数据（显式指定 timeframe 和 compression）
+                bt_data = bt.feeds.PandasData(
+                    dataname=year_data,
+                    name=asset_name,
+                    timeframe=timeframe,
+                    compression=compression
+                )
                 cerebro.adddata(bt_data)
                 cerebro.addstrategy(strategy_class, **params)
                 

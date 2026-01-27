@@ -83,6 +83,15 @@ python run_optimizer.py \
 - 如果不指定 `--data-names`，系统会自动使用文件名作为数据源名称
 - 在策略中可以通过 `self.datas[0]`、`self.datas[1]` 等访问不同的数据源
 
+**多数据源时间对齐（Backtrader）🆕**
+
+- 多数据源（尤其是分钟级数据）回测时，Backtrader 需要正确的 `timeframe` / `compression` 才能对齐时间轴。
+- 本工具已在回测引擎中**自动检测每个数据源的时间间隔**，并在加载数据时**显式设置** `timeframe` 和 `compression`，避免多源数据时间错位。
+
+**最近更新**
+
+- **2026-01-27**：修复多数据源回测时间对齐问题（自动设置 `timeframe` / `compression`）。
+
 ### 优化参数
 
 | 参数 | 简写 | 默认值 | 说明 |
