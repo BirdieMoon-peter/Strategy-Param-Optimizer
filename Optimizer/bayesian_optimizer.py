@@ -173,21 +173,17 @@ class BayesianOptimizer:
         data: pd.DataFrame,
         search_space: Dict[str, SearchSpaceConfig],
         objective: str,
-        history_list: List[Dict],
-        data_list: List[pd.DataFrame] = None,
-        data_names: List[str] = None
+        history_list: List[Dict]
     ) -> Callable:
         """
         创建Optuna目标函数
         
         Args:
             strategy_class: 策略类
-            data: 行情数据（单数据源，如果为None则使用data_list或引擎初始化的数据）
+            data: 行情数据
             search_space: 搜索空间
             objective: 优化目标
             history_list: 历史记录列表（用于存储）
-            data_list: 多数据源列表（可选）
-            data_names: 数据源名称列表（可选）
             
         Returns:
             目标函数
@@ -196,26 +192,12 @@ class BayesianOptimizer:
             # 建议参数
             params = self._suggest_params(trial, search_space)
             
-            # 运行回测（支持多数据源）
-            if data_list is not None:
-                result = self.backtest_engine.run_backtest(
-                    strategy_class=strategy_class,
-                    data_list=data_list,
-                    data_names=data_names,
-                    params=params
-                )
-            elif data is not None:
-                result = self.backtest_engine.run_backtest(
-                    strategy_class,
-                    data,
-                    params
-                )
-            else:
-                # 使用引擎初始化时的数据
-                result = self.backtest_engine.run_backtest(
-                    strategy_class=strategy_class,
-                    params=params
-                )
+            # 运行回测
+            result = self.backtest_engine.run_backtest(
+                strategy_class,
+                data,
+                params
+            )
             
             if result is None:
                 return float('-inf')
@@ -241,13 +223,12 @@ class BayesianOptimizer:
         self,
         strategy_class: Type[bt.Strategy],
         strategy_name: str,
-        data: pd.DataFrame = None,
-        objective: str = "sharpe_ratio",
+        data: pd.DataFrame,
+        objective: str,
         search_space: Dict[str, SearchSpaceConfig] = None,
         n_trials: int = None,
         verbose: bool = True,
-        data_list: List[pd.DataFrame] = None,
-        data_names: List[str] = None
+        default_params: Dict[str, Any] = None
     ) -> OptimizationResult:
         """
         单目标优化
@@ -255,13 +236,12 @@ class BayesianOptimizer:
         Args:
             strategy_class: 策略类
             strategy_name: 策略名称
-            data: 行情数据（单数据源，可选）
+            data: 行情数据
             objective: 优化目标
             search_space: 搜索空间（如果为None，自动生成）
             n_trials: 试验次数
             verbose: 是否打印进度
-            data_list: 多数据源列表（可选，优先于data）
-            data_names: 数据源名称列表（可选）
+            default_params: 策略的默认参数，将作为第一个采样点
             
         Returns:
             优化结果
@@ -294,10 +274,19 @@ class BayesianOptimizer:
             pruner=self._create_pruner()
         )
         
+        # 将默认参数作为第一个采样点加入队列
+        # 这样可以确保不会错过已经很优的默认参数
+        if default_params:
+            # 过滤出搜索空间中存在的参数
+            enqueue_params = {k: v for k, v in default_params.items() if k in search_space}
+            if enqueue_params:
+                study.enqueue_trial(enqueue_params)
+                if verbose:
+                    print(f"[初始采样] 已将策略默认参数加入采样队列: {enqueue_params}")
+        
         # 创建目标函数
         objective_fn = self._create_objective_function(
-            strategy_class, data, search_space, objective, history_list,
-            data_list=data_list, data_names=data_names
+            strategy_class, data, search_space, objective, history_list
         )
         
         # 运行优化
@@ -317,22 +306,9 @@ class BayesianOptimizer:
         best_value = study.best_value
         
         # 重新运行最佳参数获取完整回测结果
-        if data_list is not None:
-            best_result = self.backtest_engine.run_backtest(
-                strategy_class=strategy_class,
-                data_list=data_list,
-                data_names=data_names,
-                params=best_params
-            )
-        elif data is not None:
-            best_result = self.backtest_engine.run_backtest(
-                strategy_class, data, best_params
-            )
-        else:
-            best_result = self.backtest_engine.run_backtest(
-                strategy_class=strategy_class,
-                params=best_params
-            )
+        best_result = self.backtest_engine.run_backtest(
+            strategy_class, data, best_params
+        )
         
         if verbose:
             print(f"\n最佳参数: {best_params}")

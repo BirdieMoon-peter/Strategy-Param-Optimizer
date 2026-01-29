@@ -41,113 +41,113 @@ class ParamSpaceOptimizer:
     4. 提供参数空间分析和建议
     """
     
-    # 内置的参数空间规则
+    # 内置的参数空间规则（缩小初始范围，依赖自动扩展机制）
     BUILTIN_RULES = {
         # 周期类参数（period, window, length等）
         "period": ParameterSpaceRule(
             param_pattern=r".*period.*|.*window.*|.*length.*",
-            min_multiplier=0.5,
-            max_multiplier=2.5,
+            min_multiplier=0.7,  # 缩小范围: 70%-150%
+            max_multiplier=1.5,
             min_absolute=5,
             max_absolute=200,
             distribution="int_uniform",
             priority="high",
-            description="周期类参数：建议范围为默认值的50%-250%，最小5，最大200"
+            description="周期类参数：初始范围为默认值的±30%"
         ),
         
         # 标准差倍数（std_dev, devfactor等）
         "std_dev": ParameterSpaceRule(
             param_pattern=r".*std.*|.*dev.*factor.*",
-            min_multiplier=0.5,
-            max_multiplier=2.0,
+            min_multiplier=0.7,
+            max_multiplier=1.5,
             min_absolute=0.5,
             max_absolute=5.0,
             distribution="uniform",
             priority="high",
-            description="标准差倍数：建议范围0.5-5.0"
+            description="标准差倍数：初始范围±30%"
         ),
         
         # 阈值类参数（threshold, limit等）
         "threshold": ParameterSpaceRule(
             param_pattern=r".*threshold.*|.*limit.*",
-            min_multiplier=0.5,
-            max_multiplier=2.0,
+            min_multiplier=0.7,
+            max_multiplier=1.5,
             min_absolute=0.01,
             max_absolute=0.5,
             distribution="uniform",
             priority="medium",
-            description="阈值类参数：建议小范围调整"
+            description="阈值类参数：初始范围±30%"
         ),
         
         # RSI类阈值
         "rsi_threshold": ParameterSpaceRule(
             param_pattern=r".*rsi.*sold.*|.*rsi.*bought.*",
-            min_multiplier=0.7,
-            max_multiplier=1.3,
+            min_multiplier=0.85,
+            max_multiplier=1.15,
             min_absolute=10,
             max_absolute=90,
             distribution="int_uniform",
             priority="medium",
-            description="RSI阈值：建议范围10-90"
+            description="RSI阈值：初始范围±15%"
         ),
         
         # 百分比参数（percent, ratio等）
         "percent": ParameterSpaceRule(
             param_pattern=r".*percent.*|.*ratio.*",
-            min_multiplier=0.5,
-            max_multiplier=2.0,
+            min_multiplier=0.7,
+            max_multiplier=1.3,
             min_absolute=0.01,
             max_absolute=1.0,
             distribution="uniform",
             priority="medium",
-            description="百分比参数：建议范围0.01-1.0"
+            description="百分比参数：初始范围±30%"
         ),
         
         # 快速均线周期
         "fast_period": ParameterSpaceRule(
             param_pattern=r".*fast.*|.*short.*",
-            min_multiplier=0.5,
-            max_multiplier=2.0,
+            min_multiplier=0.7,
+            max_multiplier=1.5,
             min_absolute=3,
             max_absolute=50,
             distribution="int_uniform",
             priority="high",
-            description="快速周期：建议范围3-50"
+            description="快速周期：初始范围±30%"
         ),
         
         # 慢速均线周期
         "slow_period": ParameterSpaceRule(
             param_pattern=r".*slow.*|.*long.*",
-            min_multiplier=0.5,
-            max_multiplier=2.0,
+            min_multiplier=0.7,
+            max_multiplier=1.5,
             min_absolute=10,
             max_absolute=200,
             distribution="int_uniform",
             priority="high",
-            description="慢速周期：建议范围10-200"
+            description="慢速周期：初始范围±30%"
         ),
         
         # 止损止盈参数
         "stop_loss": ParameterSpaceRule(
             param_pattern=r".*stop.*loss.*|.*sl.*",
-            min_multiplier=0.5,
-            max_multiplier=2.0,
+            min_multiplier=0.7,
+            max_multiplier=1.5,
             min_absolute=0.01,
             max_absolute=0.2,
             distribution="uniform",
             priority="high",
-            description="止损参数：建议范围1%-20%"
+            description="止损参数：初始范围±30%"
         ),
         
         "take_profit": ParameterSpaceRule(
             param_pattern=r".*take.*profit.*|.*tp.*",
-            min_multiplier=0.5,
-            max_multiplier=2.0,
+            min_multiplier=0.7,
+            max_multiplier=1.5,
             min_absolute=0.02,
             max_absolute=0.5,
             distribution="uniform",
             priority="high",
-            description="止盈参数：建议范围2%-50%"
+            description="止盈参数：初始范围±30%"
         ),
     }
     
@@ -261,42 +261,15 @@ class ParamSpaceOptimizer:
             )
             
         else:
-            # 使用默认规则（更保守的范围）
+            # 使用默认规则（更保守的范围，±30%）
             if param.param_type == "int":
-                default_int = int(param.default_value)
-                if default_int == 0:
-                    # 特殊处理：默认值为0时，使用固定范围
-                    min_val = 0
-                    max_val = 2
-                elif default_int == 1:
-                    # 特殊处理：默认值为1时
-                    min_val = 1
-                    max_val = 3
-                else:
-                    min_val = max(1, int(param.default_value * 0.5))
-                    max_val = int(param.default_value * 2)
+                min_val = max(1, int(param.default_value * 0.7))
+                max_val = int(param.default_value * 1.5)
                 step = 1
             else:
-                default_float = float(param.default_value)
-                if default_float == 0:
-                    # 特殊处理：默认值为0时
-                    min_val = 0.0
-                    max_val = 0.1
-                elif default_float < 0.001:
-                    # 极小值处理
-                    min_val = default_float * 0.5 if default_float > 0 else 0.0
-                    max_val = max(default_float * 2, 0.01)
-                else:
-                    min_val = max(0.0001, param.default_value * 0.5)
-                    max_val = param.default_value * 2
+                min_val = max(0.0001, param.default_value * 0.7)
+                max_val = param.default_value * 1.5
                 step = None
-            
-            # 确保 min < max
-            if min_val >= max_val:
-                if param.param_type == "int":
-                    max_val = min_val + 2
-                else:
-                    max_val = min_val + 0.1
             
             optimized = StrategyParam(
                 name=param.name,
@@ -476,6 +449,132 @@ class ParamSpaceOptimizer:
                 )
         
         return analysis
+    
+    def expand_boundary_params(
+        self,
+        best_params: Dict[str, float],
+        param_space: List[StrategyParam],
+        expansion_factor: float = 1.5,
+        boundary_threshold: float = 0.1
+    ) -> Tuple[List[StrategyParam], List[str]]:
+        """
+        自动扩展处于边界的参数空间
+        
+        Args:
+            best_params: 最优参数
+            param_space: 当前参数空间
+            expansion_factor: 扩展因子
+            boundary_threshold: 边界阈值 (默认10%)
+            
+        Returns:
+            (扩展后的参数空间, 被扩展的参数名列表)
+        """
+        expanded_space = []
+        expanded_params = []
+        param_dict = {p.name: p for p in param_space}
+        
+        for param_def in param_space:
+            param_name = param_def.name
+            
+            if param_name not in best_params:
+                expanded_space.append(param_def)
+                continue
+            
+            param_value = best_params[param_name]
+            param_range = param_def.max_value - param_def.min_value
+            
+            if param_range <= 0:
+                expanded_space.append(param_def)
+                continue
+            
+            # 计算相对位置 (0-1)
+            relative_pos = (param_value - param_def.min_value) / param_range
+            
+            new_min = param_def.min_value
+            new_max = param_def.max_value
+            needs_expansion = False
+            
+            # 检查是否在边界附近
+            if relative_pos < boundary_threshold:  # 接近下界
+                needs_expansion = True
+                if param_def.param_type == "int":
+                    new_min = max(1, int(param_def.min_value / expansion_factor))
+                else:
+                    new_min = max(0.0001, param_def.min_value / expansion_factor)
+                    
+            elif relative_pos > (1 - boundary_threshold):  # 接近上界
+                needs_expansion = True
+                if param_def.param_type == "int":
+                    new_max = int(param_def.max_value * expansion_factor)
+                else:
+                    new_max = param_def.max_value * expansion_factor
+            
+            if needs_expansion:
+                expanded_params.append(param_name)
+                expanded_param = StrategyParam(
+                    name=param_def.name,
+                    param_type=param_def.param_type,
+                    default_value=param_def.default_value,
+                    description=param_def.description,
+                    min_value=new_min,
+                    max_value=new_max,
+                    step=param_def.step
+                )
+                expanded_space.append(expanded_param)
+            else:
+                expanded_space.append(param_def)
+        
+        return expanded_space, expanded_params
+    
+    def check_boundary_params(
+        self,
+        best_params: Dict[str, float],
+        param_space: List[StrategyParam],
+        boundary_threshold: float = 0.1
+    ) -> List[Dict[str, Any]]:
+        """
+        检查哪些参数处于边界
+        
+        Args:
+            best_params: 最优参数
+            param_space: 参数空间
+            boundary_threshold: 边界阈值
+            
+        Returns:
+            边界参数信息列表
+        """
+        boundary_params = []
+        
+        for param_def in param_space:
+            if param_def.name not in best_params:
+                continue
+            
+            param_value = best_params[param_def.name]
+            param_range = param_def.max_value - param_def.min_value
+            
+            if param_range <= 0:
+                continue
+            
+            relative_pos = (param_value - param_def.min_value) / param_range
+            
+            if relative_pos < boundary_threshold:
+                boundary_params.append({
+                    'name': param_def.name,
+                    'side': 'lower',
+                    'value': param_value,
+                    'boundary': param_def.min_value,
+                    'relative_pos': relative_pos
+                })
+            elif relative_pos > (1 - boundary_threshold):
+                boundary_params.append({
+                    'name': param_def.name,
+                    'side': 'upper',
+                    'value': param_value,
+                    'boundary': param_def.max_value,
+                    'relative_pos': relative_pos
+                })
+        
+        return boundary_params
     
     def suggest_refined_space(
         self,

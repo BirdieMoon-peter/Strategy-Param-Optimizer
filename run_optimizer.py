@@ -2,10 +2,17 @@
 """
 通用策略优化测试脚本
 支持命令行参数配置标的数据、策略脚本、优化目标、LLM等
+支持单个或多个CSV文件批量优化
 
 使用示例:
-  # 基本用法（不使用LLM）
+  # 基本用法（单个数据文件）
   python run_optimizer.py --data project_trend/data/AG.csv --strategy project_trend/src/Aberration.py
+
+  # 多个数据文件批量优化
+  python run_optimizer.py --data project_trend/data/AG.csv project_trend/data/BTC.csv project_trend/data/ETH.csv --strategy project_trend/src/Aberration.py
+
+  # 使用通配符匹配多个文件
+  python run_optimizer.py --data project_trend/data/*.csv --strategy project_trend/src/Aberration.py
 
   # 使用LLM
   python run_optimizer.py --data project_trend/data/BTC.csv --strategy project_trend/src/Aberration.py --use-llm
@@ -16,14 +23,15 @@
   # 指定要优化的参数（通过params.txt文件）
   python run_optimizer.py --data project_trend/data/AG.csv --strategy project_trend/src/Aberration.py --params-file params.txt
 
-  # 完整参数
-  python run_optimizer.py --data project_trend/data/AG.csv --strategy project_trend/src/Aberration.py --objective sharpe_ratio --trials 50 --use-llm --llm-model xuanyuan --output ./my_results
+  # 完整参数（多文件）
+  python run_optimizer.py --data project_trend/data/AG.csv project_trend/data/BTC.csv --strategy project_trend/src/Aberration.py --objective sharpe_ratio --trials 50 --use-llm --llm-model xuanyuan --output ./my_results
 """
 
 import sys
 import os
 import json
 import argparse
+import glob
 import pandas as pd
 from pathlib import Path
 from datetime import datetime
@@ -99,35 +107,25 @@ def load_space_config(config_file: str) -> dict:
     return param_space
 
 
-def prepare_data(data_path: str, data_name: str = None) -> tuple:
+def prepare_data(data_path: str) -> str:
     """
     准备数据文件：确保有 datetime 列
     
     Args:
         data_path: 原始数据文件路径
-        data_name: 数据源名称，如果不提供则使用文件名
         
     Returns:
-        (处理后的数据文件路径, 数据源名称) 元组
+        处理后的数据文件路径
     """
     df = pd.read_csv(data_path)
     
-    # 检查并重命名日期列（支持多种常见列名）
+    # 检查并重命名日期列
+    if 'date' in df.columns and 'datetime' not in df.columns:
+        df.rename(columns={'date': 'datetime'}, inplace=True)
+        print(f"[数据] 已将 'date' 列重命名为 'datetime'")
+    
     if 'datetime' not in df.columns:
-        if 'date' in df.columns:
-            df.rename(columns={'date': 'datetime'}, inplace=True)
-            print(f"[数据] 已将 'date' 列重命名为 'datetime'")
-        elif 'time_key' in df.columns:
-            df.rename(columns={'time_key': 'datetime'}, inplace=True)
-            print(f"[数据] 已将 'time_key' 列重命名为 'datetime'")
-        elif 'Datetime' in df.columns:
-            df.rename(columns={'Datetime': 'datetime'}, inplace=True)
-            print(f"[数据] 已将 'Datetime' 列重命名为 'datetime'")
-        elif 'timestamp' in df.columns:
-            df.rename(columns={'timestamp': 'datetime'}, inplace=True)
-            print(f"[数据] 已将 'timestamp' 列重命名为 'datetime'")
-        else:
-            raise ValueError("数据文件必须包含 'datetime', 'date', 'time_key' 或 'timestamp' 列")
+        raise ValueError("数据文件必须包含 'datetime' 或 'date' 列")
     
     # 转换日期格式
     df['datetime'] = pd.to_datetime(df['datetime'])
@@ -138,14 +136,10 @@ def prepare_data(data_path: str, data_name: str = None) -> tuple:
     processed_path = data_dir / f"{asset_name}_processed.csv"
     df.to_csv(processed_path, index=False)
     
-    # 确定数据源名称
-    if data_name is None:
-        data_name = asset_name.replace('_processed', '')
-    
     print(f"[数据] 处理完成: {len(df)} 条记录")
     print(f"[数据] 时间范围: {df['datetime'].min()} 至 {df['datetime'].max()}")
     
-    return str(processed_path), data_name
+    return str(processed_path)
 
 
 def create_llm_config(args) -> UniversalLLMConfig:
@@ -256,12 +250,18 @@ def print_results(result: dict, output_dir: Path, asset_name: str = None):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="通用策略优化器",
+        description="通用策略优化器（支持多CSV文件批量优化）",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 示例:
-  # 基本用法
+  # 基本用法（单个文件）
   python run_optimizer.py --data project_trend/data/AG.csv --strategy project_trend/src/Aberration.py
+
+  # 多个数据文件批量优化
+  python run_optimizer.py --data project_trend/data/AG.csv project_trend/data/BTC.csv project_trend/data/ETH.csv --strategy project_trend/src/Aberration.py
+
+  # 使用通配符匹配多个文件
+  python run_optimizer.py --data "project_trend/data/*.csv" --strategy project_trend/src/Aberration.py
 
   # 使用本地 Ollama LLM
   python run_optimizer.py --data project_trend/data/AG.csv --strategy project_trend/src/Aberration.py --use-llm
@@ -285,14 +285,9 @@ def main():
     # 必需参数
     parser.add_argument(
         "--data", "-d",
+        nargs='+',
         required=True,
-        action='append',
-        help="标的数据CSV文件路径（必须包含 datetime/date, open, high, low, close, volume 列）。支持多次指定以加载多个数据源，例如: -d data1.csv -d data2.csv"
-    )
-    parser.add_argument(
-        "--data-names", "-n",
-        action='append',
-        help="数据源名称，与--data一一对应。例如: -n QQQ -n TQQQ。如果不指定，将使用文件名作为数据源名称"
+        help="标的数据 CSV 文件路径，支持多个文件或通配符（必须包含 datetime/date, open, high, low, close, volume 列）"
     )
     parser.add_argument(
         "--strategy", "-s",
@@ -372,19 +367,32 @@ def main():
     
     args = parser.parse_args()
     
-    # 验证文件存在
-    for data_path in args.data:
-        if not Path(data_path).exists():
-            print(f"❌ 错误: 数据文件不存在: {data_path}")
+    # 展开通配符并收集所有数据文件
+    data_files = []
+    for pattern in args.data:
+        # 尝试通配符匹配
+        matched = glob.glob(pattern)
+        if matched:
+            data_files.extend(matched)
+        elif Path(pattern).exists():
+            # 不是通配符，是直接的文件路径
+            data_files.append(pattern)
+        else:
+            print(f"❌ 错误: 数据文件不存在: {pattern}")
             return 1
     
-    if not Path(args.strategy).exists():
-        print(f"❌ 错误: 策略文件不存在: {args.strategy}")
+    # 去重并过滤非 CSV 文件
+    data_files = list(set(data_files))
+    data_files = [f for f in data_files if f.endswith('.csv')]
+    data_files.sort()  # 排序以保证顺序一致
+    
+    if not data_files:
+        print("❌ 错误: 未找到有效的 CSV 数据文件")
         return 1
     
-    # 验证数据源名称数量
-    if args.data_names and len(args.data_names) != len(args.data):
-        print(f"❌ 错误: --data-names 的数量({len(args.data_names)})必须与 --data 的数量({len(args.data)})一致")
+    # 验证策略文件存在
+    if not Path(args.strategy).exists():
+        print(f"❌ 错误: 策略文件不存在: {args.strategy}")
         return 1
     
     # 加载目标参数列表（如果指定了参数文件）
@@ -417,13 +425,9 @@ def main():
         print("\n" + "="*60)
         print("通用策略优化器")
         print("="*60)
-        if len(args.data) == 1:
-            print(f"数据文件: {args.data[0]}")
-        else:
-            print(f"数据文件: {len(args.data)} 个数据源")
-            for i, dp in enumerate(args.data):
-                name = args.data_names[i] if args.data_names else Path(dp).stem
-                print(f"  [{i}] {name}: {dp}")
+        print(f"数据文件: {len(data_files)} 个")
+        for i, f in enumerate(data_files, 1):
+            print(f"  [{i}] {f}")
         print(f"策略文件: {args.strategy}")
         print(f"优化目标: {args.objective}")
         print(f"试验次数: {args.trials}")
@@ -442,21 +446,7 @@ def main():
         print("="*60 + "\n")
     
     try:
-        # 1. 准备数据
-        data_paths = []
-        data_names = []
-        for i, data_file in enumerate(args.data):
-            # 获取数据源名称
-            data_name = None
-            if args.data_names and i < len(args.data_names):
-                data_name = args.data_names[i]
-            
-            # 处理数据
-            processed_path, final_name = prepare_data(data_file, data_name)
-            data_paths.append(processed_path)
-            data_names.append(final_name)
-        
-        # 2. 配置LLM（如果需要）
+        # 1. 配置LLM（如果需要）
         llm_config = None
         if args.use_llm:
             if args.llm_type == "openai" and not args.api_key:
@@ -471,62 +461,170 @@ def main():
             if not args.quiet:
                 print(f"[LLM] 配置: {args.llm_type} / {args.llm_model}")
         
-        # 3. 创建输出目录
+        # 2. 创建输出目录
         output_dir = Path(args.output)
         output_dir.mkdir(parents=True, exist_ok=True)
         
-        # 4. 创建优化器
-        if not args.quiet:
-            print("\n[优化器] 初始化中...")
+        # 3. 批量优化每个数据文件
+        all_results = []
+        success_count = 0
+        fail_count = 0
         
-        # 如果只有一个数据源，使用原来的单数据接口
-        if len(data_paths) == 1:
-            optimizer = UniversalOptimizer(
-                data_path=data_paths[0],
-                strategy_path=str(Path(args.strategy).absolute()),
-                objective=args.objective,
-                use_llm=args.use_llm,
-                llm_config=llm_config,
-                output_dir=str(output_dir),
-                verbose=not args.quiet,
-                target_params=target_params,
-                custom_space=custom_space
-            )
-        else:
-            # 多数据源接口
-            optimizer = UniversalOptimizer(
-                data_paths=data_paths,
-                data_names=data_names,
-                strategy_path=str(Path(args.strategy).absolute()),
-                objective=args.objective,
-                use_llm=args.use_llm,
-                llm_config=llm_config,
-                output_dir=str(output_dir),
-                verbose=not args.quiet,
-                target_params=target_params,
-                custom_space=custom_space
-            )
+        for idx, data_file in enumerate(data_files, 1):
+            # 提取原始资产名称（去除 _processed 后缀）
+            original_asset_name = Path(data_file).stem.replace('_processed', '')
+            
+            if not args.quiet:
+                print("\n" + "="*60)
+                print(f"📈 [{idx}/{len(data_files)}] 开始优化: {original_asset_name}")
+                print("="*60)
+            
+            try:
+                # 准备数据
+                data_path = prepare_data(data_file)
+                
+                # 创建该资产的输出子目录
+                asset_output_dir = output_dir / original_asset_name
+                asset_output_dir.mkdir(parents=True, exist_ok=True)
+                
+                # 创建优化器
+                if not args.quiet:
+                    print("\n[优化器] 初始化中...")
+                
+                optimizer = UniversalOptimizer(
+                    data_path=data_path,
+                    strategy_path=str(Path(args.strategy).absolute()),
+                    objective=args.objective,
+                    use_llm=args.use_llm,
+                    llm_config=llm_config,
+                    output_dir=str(asset_output_dir),
+                    verbose=not args.quiet,
+                    target_params=target_params,
+                    custom_space=custom_space
+                )
+                
+                # 执行优化
+                if not args.quiet:
+                    print(f"\n[优化] 开始优化（{args.trials} 次试验）...")
+                    print(f"[优化] 预计时间: {args.trials // 2} - {args.trials} 秒\n")
+                
+                result = optimizer.optimize(n_trials=args.trials)
+                
+                # 打印和保存结果
+                print_results(result, asset_output_dir, original_asset_name)
+                
+                # 记录结果
+                all_results.append({
+                    'asset': original_asset_name,
+                    'status': 'success',
+                    'result': result
+                })
+                success_count += 1
+                
+            except Exception as e:
+                print(f"\n❌ 优化 {original_asset_name} 失败: {e}")
+                import traceback
+                traceback.print_exc()
+                all_results.append({
+                    'asset': original_asset_name,
+                    'status': 'failed',
+                    'error': str(e)
+                })
+                fail_count += 1
+                continue
         
-        # 5. 执行优化
-        if not args.quiet:
-            print(f"\n[优化] 开始优化（{args.trials} 次试验）...")
-            print(f"[优化] 预计时间: {args.trials // 2} - {args.trials} 秒\n")
+        # 4. 打印批量优化汇总
+        print("\n" + "="*60)
+        print("📊 批量优化汇总")
+        print("="*60)
+        print(f"总计: {len(data_files)} 个标的")
+        print(f"成功: {success_count} 个")
+        print(f"失败: {fail_count} 个")
         
-        result = optimizer.optimize(n_trials=args.trials)
+        if success_count > 0:
+            print("\n【各标的最优结果】")
+            print("-" * 60)
+            print(f"{'标的':<15} {'夏普比率':>12} {'年化收益':>12} {'最大回撤':>12}")
+            print("-" * 60)
+            
+            for item in all_results:
+                if item['status'] == 'success':
+                    metrics = item['result'].get('performance_metrics', {})
+                    sharpe = metrics.get('sharpe_ratio', 0)
+                    annual_ret = metrics.get('annual_return', 0)
+                    max_dd = metrics.get('max_drawdown', 0)
+                    print(f"{item['asset']:<15} {sharpe:>12.4f} {annual_ret:>11.2f}% {max_dd:>11.2f}%")
+            
+            print("-" * 60)
         
-        # 6. 打印和保存结果
-        print_results(result, output_dir)
+        # 5. 保存汇总报告
+        summary_path = output_dir / "batch_optimization_summary.txt"
+        with open(summary_path, 'w', encoding='utf-8') as f:
+            f.write("="*60 + "\n")
+            f.write("批量策略优化结果汇总\n")
+            f.write("="*60 + "\n\n")
+            f.write(f"优化时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+            f.write(f"策略文件: {args.strategy}\n")
+            f.write(f"优化目标: {args.objective}\n")
+            f.write(f"试验次数: {args.trials}\n")
+            f.write(f"标的总数: {len(data_files)}\n")
+            f.write(f"成功: {success_count}, 失败: {fail_count}\n\n")
+            
+            f.write("-"*60 + "\n")
+            f.write(f"{'标的':<15} {'夏普比率':>12} {'年化收益':>12} {'最大回撤':>12}\n")
+            f.write("-"*60 + "\n")
+            
+            for item in all_results:
+                if item['status'] == 'success':
+                    metrics = item['result'].get('performance_metrics', {})
+                    sharpe = metrics.get('sharpe_ratio', 0)
+                    annual_ret = metrics.get('annual_return', 0)
+                    max_dd = metrics.get('max_drawdown', 0)
+                    f.write(f"{item['asset']:<15} {sharpe:>12.4f} {annual_ret:>11.2f}% {max_dd:>11.2f}%\n")
+                else:
+                    f.write(f"{item['asset']:<15} {'失败':>12} {item.get('error', '')[:30]}\n")
+            
+            f.write("-"*60 + "\n")
         
-        # 查找JSON文件
-        json_files = list(output_dir.glob("optimization_*.json"))
-        if json_files:
-            print(f"完整JSON结果: {json_files[-1]}")
+        # 保存JSON汇总
+        json_summary_path = output_dir / "batch_optimization_summary.json"
+        json_summary = {
+            'optimization_time': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            'strategy': args.strategy,
+            'objective': args.objective,
+            'trials': args.trials,
+            'total_assets': len(data_files),
+            'success_count': success_count,
+            'fail_count': fail_count,
+            'results': []
+        }
+        
+        for item in all_results:
+            if item['status'] == 'success':
+                json_summary['results'].append({
+                    'asset': item['asset'],
+                    'status': 'success',
+                    'best_parameters': item['result'].get('best_parameters', {}),
+                    'performance_metrics': item['result'].get('performance_metrics', {})
+                })
+            else:
+                json_summary['results'].append({
+                    'asset': item['asset'],
+                    'status': 'failed',
+                    'error': item.get('error', '')
+                })
+        
+        with open(json_summary_path, 'w', encoding='utf-8') as f:
+            json.dump(json_summary, f, indent=2, ensure_ascii=False)
+        
+        print(f"\n汇总报告已保存至: {summary_path}")
+        print(f"JSON汇总: {json_summary_path}")
         
         print("\n" + "="*60)
-        print("优化完成！")
+        print("✅ 批量优化完成！")
         print("="*60 + "\n")
         
-        return 0
+        return 0 if fail_count == 0 else 1
         
     except KeyboardInterrupt:
         print("\n\n⚠️  优化被用户中断")

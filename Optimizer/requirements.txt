@@ -18,9 +18,8 @@ matplotlib>=3.5.0
 # 数据处理
 scipy>=1.9.0
 
-# 性能指标计算 (替代 backtrader 内置 analyzers)
+# 性能指标计算 (pyfolio风格)
 empyrical>=0.5.5
-pyfolio-reloaded>=0.9.5
 
 # 可选：进度条
 tqdm>=4.64.0

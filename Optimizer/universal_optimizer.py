@@ -8,7 +8,6 @@ import os
 import sys
 import json
 import pandas as pd
-import backtrader as bt
 import importlib.util
 import inspect
 from typing import Dict, List, Any, Optional, Type
@@ -44,10 +43,8 @@ class UniversalOptimizer:
     
     def __init__(
         self,
-        data_path: str = None,
-        data_paths: List[str] = None,
-        data_names: List[str] = None,
-        strategy_path: str = None,
+        data_path: str,
+        strategy_path: str,
         objective: str = "sharpe_ratio",
         use_llm: bool = False,
         llm_config: Optional[UniversalLLMConfig] = None,
@@ -60,9 +57,7 @@ class UniversalOptimizer:
         初始化优化器
         
         Args:
-            data_path: 标的数据CSV文件路径（单数据源，与data_paths互斥）
-            data_paths: 多个数据CSV文件路径列表（多数据源，与data_path互斥）
-            data_names: 数据源名称列表，与data_paths对应
+            data_path: 标的数据CSV文件路径
             strategy_path: 策略脚本文件路径（.py文件）
             objective: 优化目标（sharpe_ratio, annual_return, etc.）
             use_llm: 是否使用LLM
@@ -72,25 +67,7 @@ class UniversalOptimizer:
             target_params: 指定要优化的参数列表，为None时优化所有参数
             custom_space: 自定义参数空间配置，格式: {param_name: {min, max, step, distribution}}
         """
-        # 验证参数
-        if data_path is None and data_paths is None:
-            raise ValueError("必须提供 data_path 或 data_paths")
-        if data_path is not None and data_paths is not None:
-            raise ValueError("data_path 和 data_paths 不能同时提供")
-        
-        # 标准化为多数据源格式
-        if data_path is not None:
-            self.data_paths = [data_path]
-            self.data_names = [Path(data_path).stem.replace('_processed', '')]
-            self.is_multi_data = False
-        else:
-            self.data_paths = data_paths
-            if data_names is None:
-                self.data_names = [Path(p).stem.replace('_processed', '') for p in data_paths]
-            else:
-                self.data_names = data_names
-            self.is_multi_data = len(data_paths) > 1
-        
+        self.data_path = data_path
         self.strategy_path = strategy_path
         self.objective = objective
         self.use_llm = use_llm
@@ -106,8 +83,10 @@ class UniversalOptimizer:
         self.param_space_optimizer = ParamSpaceOptimizer(verbose=self.verbose)
         
         # 加载数据
-        self.data_list = self._load_data()
-        self.asset_name = self.data_names[0] if len(self.data_names) == 1 else "+".join(self.data_names)
+        self.data = self._load_data()
+        # 从文件名提取资产名称，去除 _processed 后缀
+        raw_asset_name = Path(data_path).stem
+        self.asset_name = raw_asset_name.replace('_processed', '')
         
         # 加载策略
         self.strategy_class, self.strategy_info = self._load_strategy()
@@ -122,65 +101,46 @@ class UniversalOptimizer:
                 print(f"[LLM] 初始化成功: {llm_config.api_type} - {llm_config.model_name}")
         
         # 初始化回测引擎
-        if self.is_multi_data:
-            self.backtest_engine = BacktestEngine(
-                data_list=self.data_list,
-                data_names=self.data_names,
-                strategy_class=self.strategy_class,
-                initial_cash=100000.0,
-                commission=0.001
-            )
-        else:
-            self.backtest_engine = BacktestEngine(
-                data=self.data_list[0],
-                strategy_class=self.strategy_class,
-                initial_cash=100000.0,
-                commission=0.001
-            )
+        self.backtest_engine = BacktestEngine(
+            data=self.data,
+            strategy_class=self.strategy_class,
+            initial_cash=100000.0,
+            commission=0.001
+        )
         
         if self.verbose:
             print(f"\n{'='*60}")
             print(f"通用策略优化器初始化完成")
             print(f"{'='*60}")
-            if self.is_multi_data:
-                print(f"数据源数量: {len(self.data_names)}")
-                for i, name in enumerate(self.data_names):
-                    print(f"  [{i}] {name}: {len(self.data_list[i])} 数据点")
-            else:
-                print(f"标的: {self.asset_name}")
-                print(f"数据点数: {len(self.data_list[0])}")
+            print(f"标的: {self.asset_name}")
             print(f"策略: {self.strategy_info['class_name']}")
             print(f"优化目标: {objective}")
             print(f"使用LLM: {'是' if use_llm else '否'}")
+            print(f"数据点数: {len(self.data)}")
             print(f"{'='*60}\n")
     
-    def _load_data(self) -> List[pd.DataFrame]:
+    def _load_data(self) -> pd.DataFrame:
         """加载标的数据"""
-        data_list = []
+        if not os.path.exists(self.data_path):
+            raise FileNotFoundError(f"数据文件不存在: {self.data_path}")
         
-        for i, data_path in enumerate(self.data_paths):
-            if not os.path.exists(data_path):
-                raise FileNotFoundError(f"数据文件不存在: {data_path}")
-            
-            df = pd.read_csv(data_path)
-            
-            # 验证必需的列
-            required_columns = ['datetime', 'open', 'high', 'low', 'close', 'volume']
-            missing_columns = [col for col in required_columns if col not in df.columns]
-            
-            if missing_columns:
-                raise ValueError(f"数据文件 {data_path} 缺少必需的列: {missing_columns}")
-            
-            # 转换datetime列
-            df['datetime'] = pd.to_datetime(df['datetime'])
-            
-            if self.verbose:
-                print(f"[数据{i}] 成功加载: {self.data_names[i]} ({data_path})")
-                print(f"        时间范围: {df['datetime'].min()} 至 {df['datetime'].max()}")
-            
-            data_list.append(df)
+        df = pd.read_csv(self.data_path)
         
-        return data_list
+        # 验证必需的列
+        required_columns = ['datetime', 'open', 'high', 'low', 'close', 'volume']
+        missing_columns = [col for col in required_columns if col not in df.columns]
+        
+        if missing_columns:
+            raise ValueError(f"数据文件缺少必需的列: {missing_columns}")
+        
+        # 转换datetime列
+        df['datetime'] = pd.to_datetime(df['datetime'])
+        
+        if self.verbose:
+            print(f"[数据] 成功加载: {self.data_path}")
+            print(f"       时间范围: {df['datetime'].min()} 至 {df['datetime'].max()}")
+        
+        return df
     
     def _load_strategy(self) -> tuple:
         """
@@ -200,13 +160,10 @@ class UniversalOptimizer:
         sys.modules[module_name] = module
         spec.loader.exec_module(module)
         
-        # 查找策略类（必须继承自backtrader.Strategy）
+        # 查找策略类（继承自backtrader.Strategy）
         strategy_classes = []
         for name, obj in inspect.getmembers(module):
-            if (inspect.isclass(obj) and 
-                obj.__module__ == module_name and
-                issubclass(obj, bt.Strategy) and 
-                obj is not bt.Strategy):
+            if inspect.isclass(obj) and hasattr(obj, 'params') and obj.__module__ == module_name:
                 strategy_classes.append(obj)
         
         if not strategy_classes:
@@ -332,14 +289,22 @@ class UniversalOptimizer:
     def optimize(
         self,
         n_trials: int = 50,
-        bayesian_config: Optional[BayesianOptConfig] = None
+        bayesian_config: Optional[BayesianOptConfig] = None,
+        auto_expand_boundary: bool = True,
+        max_expansion_rounds: int = 2,
+        boundary_threshold: float = 0.1,
+        expansion_factor: float = 1.5
     ) -> Dict[str, Any]:
         """
-        执行优化
+        执行优化（支持自动边界扩展）
         
         Args:
             n_trials: 优化试验次数
             bayesian_config: 贝叶斯优化配置
+            auto_expand_boundary: 是否自动扩展边界参数
+            max_expansion_rounds: 最大扩展轮数
+            boundary_threshold: 边界阈值 (默认10%)
+            expansion_factor: 扩展因子
             
         Returns:
             优化结果字典
@@ -347,57 +312,117 @@ class UniversalOptimizer:
         if self.verbose:
             print(f"\n{'='*60}")
             print(f"开始优化流程")
+            if auto_expand_boundary:
+                print(f"自动边界扩展: 启用 (最多{max_expansion_rounds}轮)")
             print(f"{'='*60}\n")
         
-        # 1. 构建搜索空间
+        # 1. 构建初始搜索空间（紧凑范围）
         search_space_config = self._build_search_space()
+        current_space = search_space_config.strategy_params.copy()
         
-        # 将 SearchSpaceConfig 转换为优化器需要的格式
-        search_space = self._convert_search_space(search_space_config)
+        # 提取策略的默认参数，用于初始采样
+        default_params = {}
+        for param in self.strategy_info['params']:
+            default_params[param.name] = param.default_value
         
-        # 2. 执行贝叶斯优化
+        # 2. 配置贝叶斯优化
         if bayesian_config is None:
             bayesian_config = BayesianOptConfig(
                 n_trials=n_trials,
-                n_rounds=1,  # 单轮优化
+                n_rounds=1,
                 sampler="tpe"
             )
         
-        optimizer = BayesianOptimizer(
-            config=bayesian_config,
-            backtest_engine=self.backtest_engine,
-            use_llm=False,  # 使用我们自己的 LLM 客户端
-            verbose=self.verbose
-        )
+        best_result = None
+        best_params = None
+        best_value = float('-inf')
+        expansion_round = 0
         
-        # 调用优化方法（支持多数据源）
-        if self.is_multi_data:
+        # 3. 优化循环（支持自动边界扩展）
+        while True:
+            round_label = f"第{expansion_round + 1}轮" if expansion_round > 0 else "初始优化"
+            
+            if self.verbose and expansion_round > 0:
+                print(f"\n{'='*60}")
+                print(f"🔄 {round_label}（边界扩展后重新优化）")
+                print(f"{'='*60}\n")
+            
+            # 转换搜索空间
+            search_space = self._convert_search_space(
+                SearchSpaceConfig(strategy_params=current_space)
+            )
+            
+            # 创建优化器
+            optimizer = BayesianOptimizer(
+                config=bayesian_config,
+                backtest_engine=self.backtest_engine,
+                use_llm=False,
+                verbose=self.verbose
+            )
+            
+            # 确定初始采样点（首轮用默认参数，后续轮用上一轮最优）
+            init_params = default_params if expansion_round == 0 else best_params
+            
+            # 执行优化
             opt_result = optimizer.optimize_single_objective(
                 strategy_class=self.strategy_class,
                 strategy_name=self.strategy_info['class_name'],
-                data_list=self.data_list,
-                data_names=self.data_names,
+                data=self.data,
                 objective=self.objective,
                 search_space=search_space,
                 n_trials=n_trials,
-                verbose=self.verbose
+                verbose=self.verbose,
+                default_params=init_params
             )
-        else:
-            opt_result = optimizer.optimize_single_objective(
-                strategy_class=self.strategy_class,
-                strategy_name=self.strategy_info['class_name'],
-                data=self.data_list[0],
-                objective=self.objective,
-                search_space=search_space,
-                n_trials=n_trials,
-                verbose=self.verbose
+            
+            # 更新最优结果
+            current_value = opt_result.best_value
+            if current_value > best_value:
+                best_value = current_value
+                best_params = opt_result.best_params
+                best_result = opt_result.backtest_result
+            
+            # 检查是否需要扩展边界
+            if not auto_expand_boundary or expansion_round >= max_expansion_rounds:
+                break
+            
+            # 检测边界参数
+            boundary_params = self.param_space_optimizer.check_boundary_params(
+                opt_result.best_params,
+                current_space,
+                boundary_threshold=boundary_threshold
             )
+            
+            if not boundary_params:
+                if self.verbose:
+                    print(f"\n✅ 无参数处于边界，优化完成")
+                break
+            
+            # 有参数在边界，执行扩展
+            if self.verbose:
+                print(f"\n⚠️  检测到 {len(boundary_params)} 个参数处于边界:")
+                for bp in boundary_params:
+                    side_cn = "下界" if bp['side'] == 'lower' else "上界"
+                    print(f"   • {bp['name']}: {bp['value']:.4f} (接近{side_cn} {bp['boundary']:.4f})")
+                print(f"\n🔄 自动扩展边界参数，准备第{expansion_round + 2}轮优化...")
+            
+            # 扩展边界
+            current_space, expanded_names = self.param_space_optimizer.expand_boundary_params(
+                opt_result.best_params,
+                current_space,
+                expansion_factor=expansion_factor,
+                boundary_threshold=boundary_threshold
+            )
+            
+            if self.verbose:
+                print(f"\n📐 扩展后的参数空间:")
+                for param in current_space:
+                    if param.name in expanded_names:
+                        print(f"   • {param.name}: [{param.min_value}, {param.max_value}] (已扩展)")
+            
+            expansion_round += 1
         
-        # 提取回测结果
-        best_result = opt_result.backtest_result
-        best_params = opt_result.best_params  # 从优化结果中获取最优参数
-        
-        # 3. 分析参数空间使用情况
+        # 4. 分析参数空间使用情况
         if self.verbose:
             print(f"\n{'='*60}")
             print("参数空间分析")
@@ -405,7 +430,7 @@ class UniversalOptimizer:
         
         param_analysis = self.param_space_optimizer.analyze_optimization_results(
             best_params,
-            search_space_config.strategy_params
+            current_space
         )
         
         if self.verbose and param_analysis["suggestions"]:
@@ -414,16 +439,18 @@ class UniversalOptimizer:
                 print(f"  • {suggestion}")
             print(f"{'='*60}\n")
         
-        # 4. 生成详细结果（包含LLM解释和参数空间分析）
+        # 5. 生成详细结果
         result = self._generate_result(best_result)
         result["param_space_analysis"] = param_analysis
+        result["optimization_info"]["expansion_rounds"] = expansion_round
+        result["optimization_info"]["auto_expand_boundary"] = auto_expand_boundary
         
-        # 5. 保存结果
+        # 6. 保存结果
         output_path = self._save_result(result)
         
         if self.verbose:
             print(f"\n{'='*60}")
-            print(f"优化完成")
+            print(f"优化完成 (共{expansion_round + 1}轮)")
             print(f"{'='*60}")
             print(f"结果已保存至: {output_path}")
             print(f"{'='*60}\n")
@@ -503,8 +530,6 @@ class UniversalOptimizer:
     
     def _generate_result(self, best_result: BacktestResult) -> Dict[str, Any]:
         """生成完整的结果字典"""
-        # 获取数据范围（使用第一个数据源）
-        primary_data = self.data_list[0]
         result = {
             "optimization_info": {
                 "asset_name": self.asset_name,
@@ -512,9 +537,9 @@ class UniversalOptimizer:
                 "optimization_objective": self.objective,
                 "optimization_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 "data_range": {
-                    "start": primary_data['datetime'].min().strftime("%Y-%m-%d"),
-                    "end": primary_data['datetime'].max().strftime("%Y-%m-%d"),
-                    "total_days": len(primary_data)
+                    "start": self.data['datetime'].min().strftime("%Y-%m-%d"),
+                    "end": self.data['datetime'].max().strftime("%Y-%m-%d"),
+                    "total_days": len(self.data)
                 }
             },
             "best_parameters": best_result.params,
