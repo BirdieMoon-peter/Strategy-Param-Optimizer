@@ -2,6 +2,11 @@
 """
 通用策略优化器
 支持任意标的和策略的优化
+
+v2.0 更新:
+- 集成增强采样器（正态分布采样 + 并行探索）
+- 动态试验次数根据参数量自动调整
+- 增强的边界二次搜索功能
 """
 
 import os
@@ -21,6 +26,13 @@ from bayesian_optimizer import BayesianOptimizer
 from config import StrategyParam, BayesianOptConfig
 from strategy_analyzer import SearchSpaceConfig as ParamSearchSpaceConfig
 from param_space_optimizer import ParamSpaceOptimizer
+
+# 导入增强采样器
+try:
+    from enhanced_sampler import SamplerConfig, DynamicTrialsCalculator
+    ENHANCED_SAMPLER_AVAILABLE = True
+except ImportError:
+    ENHANCED_SAMPLER_AVAILABLE = False
 
 # 定义内部 SearchSpaceConfig
 @dataclass  
@@ -293,42 +305,70 @@ class UniversalOptimizer:
         auto_expand_boundary: bool = True,
         max_expansion_rounds: int = 2,
         boundary_threshold: float = 0.1,
-        expansion_factor: float = 1.5
+        expansion_factor: float = 1.5,
+        use_enhanced_sampler: bool = True,
+        enable_dynamic_trials: bool = True
     ) -> Dict[str, Any]:
         """
-        执行优化（支持自动边界扩展）
+        执行优化（支持自动边界扩展、增强采样器和动态试验次数）
         
         Args:
-            n_trials: 优化试验次数
+            n_trials: 优化试验次数（基础值，可能被动态调整）
             bayesian_config: 贝叶斯优化配置
             auto_expand_boundary: 是否自动扩展边界参数
             max_expansion_rounds: 最大扩展轮数
             boundary_threshold: 边界阈值 (默认10%)
             expansion_factor: 扩展因子
+            use_enhanced_sampler: 是否使用增强采样器（正态分布 + 并行）
+            enable_dynamic_trials: 是否根据参数量动态调整试验次数
             
         Returns:
             优化结果字典
         """
-        if self.verbose:
-            print(f"\n{'='*60}")
-            print(f"开始优化流程")
-            if auto_expand_boundary:
-                print(f"自动边界扩展: 启用 (最多{max_expansion_rounds}轮)")
-            print(f"{'='*60}\n")
-        
         # 1. 构建初始搜索空间（紧凑范围）
         search_space_config = self._build_search_space()
         current_space = search_space_config.strategy_params.copy()
+        n_params = len(current_space)
+        
+        # 2. 动态计算试验次数
+        actual_trials = n_trials
+        exploration_trials = 0
+        exploitation_trials = n_trials
+        
+        if enable_dynamic_trials and ENHANCED_SAMPLER_AVAILABLE:
+            config = SamplerConfig()
+            calculator = DynamicTrialsCalculator(config)
+            actual_trials, exploration_trials, exploitation_trials = \
+                calculator.calculate_trials(n_params, user_trials=n_trials)
+        
+        if self.verbose:
+            print(f"\n{'='*60}")
+            print(f"开始优化流程")
+            print(f"{'='*60}")
+            print(f"参数数量: {n_params}")
+            if enable_dynamic_trials and ENHANCED_SAMPLER_AVAILABLE:
+                print(f"动态试验次数: 启用")
+                print(f"  - 用户指定: {n_trials} 次")
+                print(f"  - 实际试验: {actual_trials} 次")
+                print(f"    • 探索阶段 (正态分布): {exploration_trials} 次")
+                print(f"    • 利用阶段 (贝叶斯): {exploitation_trials} 次")
+            else:
+                print(f"试验次数: {actual_trials} 次")
+            if use_enhanced_sampler and ENHANCED_SAMPLER_AVAILABLE:
+                print(f"采样策略: 正态分布 + 贝叶斯优化")
+            if auto_expand_boundary:
+                print(f"边界二次搜索: 启用 (最多{max_expansion_rounds}轮)")
+            print(f"{'='*60}\n")
         
         # 提取策略的默认参数，用于初始采样
         default_params = {}
         for param in self.strategy_info['params']:
             default_params[param.name] = param.default_value
         
-        # 2. 配置贝叶斯优化
+        # 3. 配置贝叶斯优化
         if bayesian_config is None:
             bayesian_config = BayesianOptConfig(
-                n_trials=n_trials,
+                n_trials=actual_trials,
                 n_rounds=1,
                 sampler="tpe"
             )
@@ -337,14 +377,17 @@ class UniversalOptimizer:
         best_params = None
         best_value = float('-inf')
         expansion_round = 0
+        all_history = []
         
-        # 3. 优化循环（支持自动边界扩展）
+        # 4. 优化循环（支持自动边界扩展）
         while True:
             round_label = f"第{expansion_round + 1}轮" if expansion_round > 0 else "初始优化"
+            round_trials = actual_trials if expansion_round == 0 else int(actual_trials * 0.5)  # 二次搜索用一半试验
             
             if self.verbose and expansion_round > 0:
                 print(f"\n{'='*60}")
-                print(f"🔄 {round_label}（边界扩展后重新优化）")
+                print(f"🔄 边界二次搜索 - {round_label}")
+                print(f"试验次数: {round_trials}")
                 print(f"{'='*60}\n")
             
             # 转换搜索空间
@@ -363,16 +406,17 @@ class UniversalOptimizer:
             # 确定初始采样点（首轮用默认参数，后续轮用上一轮最优）
             init_params = default_params if expansion_round == 0 else best_params
             
-            # 执行优化
+            # 执行优化（使用增强采样器）
             opt_result = optimizer.optimize_single_objective(
                 strategy_class=self.strategy_class,
                 strategy_name=self.strategy_info['class_name'],
                 data=self.data,
                 objective=self.objective,
                 search_space=search_space,
-                n_trials=n_trials,
+                n_trials=round_trials,
                 verbose=self.verbose,
-                default_params=init_params
+                default_params=init_params,
+                use_enhanced_sampler=use_enhanced_sampler and ENHANCED_SAMPLER_AVAILABLE
             )
             
             # 更新最优结果
@@ -404,7 +448,7 @@ class UniversalOptimizer:
                 for bp in boundary_params:
                     side_cn = "下界" if bp['side'] == 'lower' else "上界"
                     print(f"   • {bp['name']}: {bp['value']:.4f} (接近{side_cn} {bp['boundary']:.4f})")
-                print(f"\n🔄 自动扩展边界参数，准备第{expansion_round + 2}轮优化...")
+                print(f"\n🔄 自动扩展边界参数，开始二次搜索...")
             
             # 扩展边界
             current_space, expanded_names = self.param_space_optimizer.expand_boundary_params(
@@ -422,7 +466,7 @@ class UniversalOptimizer:
             
             expansion_round += 1
         
-        # 4. 分析参数空间使用情况
+        # 5. 分析参数空间使用情况
         if self.verbose:
             print(f"\n{'='*60}")
             print("参数空间分析")
@@ -439,19 +483,29 @@ class UniversalOptimizer:
                 print(f"  • {suggestion}")
             print(f"{'='*60}\n")
         
-        # 5. 生成详细结果
+        # 6. 生成详细结果
         result = self._generate_result(best_result)
         result["param_space_analysis"] = param_analysis
         result["optimization_info"]["expansion_rounds"] = expansion_round
         result["optimization_info"]["auto_expand_boundary"] = auto_expand_boundary
+        result["optimization_info"]["total_trials"] = actual_trials
+        result["optimization_info"]["exploration_trials"] = exploration_trials
+        result["optimization_info"]["exploitation_trials"] = exploitation_trials
+        result["optimization_info"]["use_enhanced_sampler"] = use_enhanced_sampler and ENHANCED_SAMPLER_AVAILABLE
+        result["optimization_info"]["dynamic_trials_enabled"] = enable_dynamic_trials
         
-        # 6. 保存结果
+        # 7. 保存结果
         output_path = self._save_result(result)
         
         if self.verbose:
             print(f"\n{'='*60}")
-            print(f"优化完成 (共{expansion_round + 1}轮)")
+            print(f"✅ 优化完成!")
             print(f"{'='*60}")
+            print(f"总轮数: {expansion_round + 1}")
+            print(f"总试验次数: {actual_trials}")
+            if expansion_round > 0:
+                print(f"  - 初始优化: {actual_trials} 次")
+                print(f"  - 边界二次搜索: {expansion_round} 轮")
             print(f"结果已保存至: {output_path}")
             print(f"{'='*60}\n")
         

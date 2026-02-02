@@ -2,6 +2,12 @@
 """
 贝叶斯优化器模块
 基于Optuna实现多目标贝叶斯优化，支持LLM动态调整搜索空间
+
+v2.0 更新:
+- 支持正态分布采样（初始探索阶段）
+- 支持并行随机探索
+- 动态试验次数根据参数量调整
+- 两阶段优化：探索阶段 + 利用阶段
 """
 
 import os
@@ -32,6 +38,16 @@ from config import (
 from strategy_analyzer import StrategyAnalyzer, SearchSpaceConfig, convert_to_optuna_space
 from backtest_engine import BacktestEngine, BacktestResult
 from llm_client import LLMClient, get_llm_client
+
+# 导入增强采样器
+try:
+    from enhanced_sampler import (
+        EnhancedOptimizer, SamplerConfig, 
+        NormalDistributionSampler, DynamicTrialsCalculator
+    )
+    ENHANCED_SAMPLER_AVAILABLE = True
+except ImportError:
+    ENHANCED_SAMPLER_AVAILABLE = False
 
 
 @dataclass
@@ -228,10 +244,11 @@ class BayesianOptimizer:
         search_space: Dict[str, SearchSpaceConfig] = None,
         n_trials: int = None,
         verbose: bool = True,
-        default_params: Dict[str, Any] = None
+        default_params: Dict[str, Any] = None,
+        use_enhanced_sampler: bool = True
     ) -> OptimizationResult:
         """
-        单目标优化
+        单目标优化（支持两阶段优化）
         
         Args:
             strategy_class: 策略类
@@ -242,11 +259,32 @@ class BayesianOptimizer:
             n_trials: 试验次数
             verbose: 是否打印进度
             default_params: 策略的默认参数，将作为第一个采样点
+            use_enhanced_sampler: 是否使用增强采样器（正态分布 + 并行探索）
             
         Returns:
             优化结果
         """
-        n_trials = n_trials or self.config.n_trials
+        n_params = len(search_space) if search_space else 0
+        
+        # 动态计算试验次数（如果启用增强采样器）
+        if use_enhanced_sampler and ENHANCED_SAMPLER_AVAILABLE and n_params > 0:
+            config = SamplerConfig()
+            calculator = DynamicTrialsCalculator(config)
+            recommended_trials, exploration_trials, exploitation_trials = \
+                calculator.calculate_trials(n_params, search_space, n_trials)
+            
+            if verbose:
+                print(f"\n[动态试验次数] 参数数量: {n_params}")
+                print(f"[动态试验次数] 推荐总试验: {recommended_trials} "
+                      f"(探索: {exploration_trials}, 利用: {exploitation_trials})")
+                if n_trials and n_trials < recommended_trials:
+                    print(f"[动态试验次数] ⚠️ 用户指定 {n_trials} 次，已调整为推荐值")
+            
+            n_trials = recommended_trials
+        else:
+            n_trials = n_trials or self.config.n_trials
+            exploration_trials = int(n_trials * 0.3)
+            exploitation_trials = n_trials - exploration_trials
         
         # 生成搜索空间
         if search_space is None:
@@ -259,11 +297,106 @@ class BayesianOptimizer:
             print(f"\n{'='*60}")
             print(f"开始优化: {strategy_name}")
             print(f"目标: {objective}")
-            print(f"试验次数: {n_trials}")
+            print(f"总试验次数: {n_trials}")
+            if use_enhanced_sampler and ENHANCED_SAMPLER_AVAILABLE:
+                print(f"优化策略: 两阶段优化 (正态分布探索 + 贝叶斯利用)")
             print(f"{'='*60}")
         
         # 初始化历史记录
         history_list = []
+        start_time = datetime.now()
+        
+        # ============ 阶段1: 正态分布随机探索 ============
+        best_exploration_params = None
+        best_exploration_value = float('-inf')
+        
+        if use_enhanced_sampler and ENHANCED_SAMPLER_AVAILABLE and exploration_trials > 0:
+            if verbose:
+                print(f"\n{'='*60}")
+                print(f"阶段1: 正态分布随机探索 ({exploration_trials} 次)")
+                print(f"{'='*60}")
+            
+            sampler = NormalDistributionSampler(SamplerConfig(), seed=self.config.seed)
+            
+            # 生成正态分布采样的参数组（Trial 0 为策略默认参数）
+            samples, has_default_trial0 = sampler.generate_initial_samples(
+                search_space=search_space,
+                n_samples=exploration_trials,
+                default_params=default_params,
+                include_default=True
+            )
+            
+            # 记录 Trial 0（默认参数）的结果
+            default_params_value = None
+            
+            # 评估每组参数
+            for i, params in enumerate(samples):
+                try:
+                    # 标记 Trial 0（策略默认参数）
+                    is_default_trial = (i == 0 and has_default_trial0)
+                    
+                    if verbose and is_default_trial:
+                        print(f"\n[Trial 0] 策略默认参数回测:")
+                        for k, v in params.items():
+                            if isinstance(v, float):
+                                print(f"   • {k}: {v:.4f}")
+                            else:
+                                print(f"   • {k}: {v}")
+                    
+                    result = self.backtest_engine.run_backtest(
+                        strategy_class, data, params
+                    )
+                    if result is None:
+                        value = float('-inf')
+                    else:
+                        value = self.backtest_engine.evaluate_objective(result, objective)
+                    
+                    # 记录 Trial 0 的结果
+                    if is_default_trial:
+                        default_params_value = value
+                        if verbose:
+                            print(f"[Trial 0] 默认参数 {objective}: {value:.4f}")
+                            if result:
+                                print(f"[Trial 0] 夏普比率: {result.sharpe_ratio:.4f}, "
+                                      f"年化收益: {result.annual_return:.2f}%, "
+                                      f"最大回撤: {result.max_drawdown:.2f}%")
+                            print()
+                    
+                    history_list.append({
+                        "trial": i,
+                        "phase": "exploration",
+                        "is_default": is_default_trial,
+                        "params": params.copy(),
+                        "value": value,
+                        "sharpe": result.sharpe_ratio if result else 0,
+                        "annual_return": result.annual_return if result else 0,
+                        "max_drawdown": result.max_drawdown if result else 0
+                    })
+                    
+                    if value > best_exploration_value:
+                        best_exploration_value = value
+                        best_exploration_params = params.copy()
+                    
+                    if verbose and (i + 1) % 5 == 0:
+                        print(f"[探索阶段] 进度: {i+1}/{exploration_trials} "
+                              f"当前最优: {best_exploration_value:.4f}")
+                        
+                except Exception as e:
+                    if verbose:
+                        print(f"[探索阶段] 试验 {i} 失败: {e}")
+            
+            if verbose:
+                print(f"\n[探索阶段完成] 最佳值: {best_exploration_value:.4f}")
+                print(f"[探索阶段完成] 最佳参数: {best_exploration_params}")
+                if default_params_value is not None:
+                    improvement = ((best_exploration_value - default_params_value) / abs(default_params_value) * 100) if default_params_value != 0 else 0
+                    print(f"[探索阶段完成] 相比默认参数提升: {improvement:+.2f}%")
+        
+        # ============ 阶段2: 贝叶斯智能采样（利用阶段）============
+        if verbose:
+            print(f"\n{'='*60}")
+            print(f"阶段2: 贝叶斯智能采样 ({exploitation_trials} 次)")
+            print(f"{'='*60}")
         
         # 创建Study
         direction = "maximize"  # 回撤已在evaluate_objective中取负
@@ -274,36 +407,52 @@ class BayesianOptimizer:
             pruner=self._create_pruner()
         )
         
-        # 将默认参数作为第一个采样点加入队列
-        # 这样可以确保不会错过已经很优的默认参数
-        if default_params:
-            # 过滤出搜索空间中存在的参数
+        # 将探索阶段的最佳参数作为初始点
+        if best_exploration_params:
+            enqueue_params = {k: v for k, v in best_exploration_params.items() if k in search_space}
+            if enqueue_params:
+                study.enqueue_trial(enqueue_params)
+                if verbose:
+                    print(f"[利用阶段] 已将探索阶段最佳参数加入采样队列")
+        elif default_params:
+            # 如果没有探索阶段，使用默认参数
             enqueue_params = {k: v for k, v in default_params.items() if k in search_space}
             if enqueue_params:
                 study.enqueue_trial(enqueue_params)
                 if verbose:
-                    print(f"[初始采样] 已将策略默认参数加入采样队列: {enqueue_params}")
+                    print(f"[利用阶段] 已将默认参数加入采样队列")
         
         # 创建目标函数
+        exploitation_history = []
         objective_fn = self._create_objective_function(
-            strategy_class, data, search_space, objective, history_list
+            strategy_class, data, search_space, objective, exploitation_history
         )
         
-        # 运行优化
-        start_time = datetime.now()
-        
+        # 运行贝叶斯优化
         study.optimize(
             objective_fn,
-            n_trials=n_trials,
+            n_trials=exploitation_trials,
             show_progress_bar=verbose,
             n_jobs=self.config.n_jobs
         )
         
+        # 合并历史记录
+        for i, record in enumerate(exploitation_history):
+            record['trial'] = len(history_list) + i
+            record['phase'] = 'exploitation'
+            history_list.append(record)
+        
         optimization_time = (datetime.now() - start_time).total_seconds()
         
-        # 获取最佳结果
+        # 获取最佳结果（比较探索和利用阶段）
         best_params = study.best_params
         best_value = study.best_value
+        
+        if best_exploration_value > best_value:
+            best_params = best_exploration_params
+            best_value = best_exploration_value
+            if verbose:
+                print(f"\n[结果] 探索阶段找到的参数更优!")
         
         # 重新运行最佳参数获取完整回测结果
         best_result = self.backtest_engine.run_backtest(
@@ -311,13 +460,17 @@ class BayesianOptimizer:
         )
         
         if verbose:
-            print(f"\n最佳参数: {best_params}")
+            print(f"\n{'='*60}")
+            print(f"优化完成!")
+            print(f"{'='*60}")
+            print(f"最佳参数: {best_params}")
             print(f"最佳{objective}: {best_value:.4f}")
             if best_result:
                 summary = self.backtest_engine.get_result_summary(best_result)
                 print("回测结果:")
                 for k, v in summary.items():
                     print(f"  {k}: {v}")
+            print(f"总耗时: {optimization_time:.2f} 秒")
         
         # 保存历史
         key = f"{strategy_name}_{objective}"

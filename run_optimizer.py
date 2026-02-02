@@ -306,7 +306,7 @@ def main():
         "--trials", "-t",
         type=int,
         default=50,
-        help="优化试验次数（默认: 50）"
+        help="优化试验次数（默认: 50，启用动态试验会自动调整）"
     )
     parser.add_argument(
         "--params-file", "-p",
@@ -317,6 +317,29 @@ def main():
         "--space-config", "-S",
         default=None,
         help="参数空间配置文件（JSON格式），用于手动指定参数搜索范围，参考 space_config_example.json"
+    )
+    
+    # v2.0 新增：增强采样器参数
+    parser.add_argument(
+        "--no-enhanced-sampler",
+        action="store_true",
+        help="禁用增强采样器（正态分布采样），使用传统均匀采样"
+    )
+    parser.add_argument(
+        "--no-dynamic-trials",
+        action="store_true",
+        help="禁用动态试验次数，使用用户指定的固定值"
+    )
+    parser.add_argument(
+        "--no-boundary-search",
+        action="store_true",
+        help="禁用边界二次搜索"
+    )
+    parser.add_argument(
+        "--max-boundary-rounds",
+        type=int,
+        default=2,
+        help="边界二次搜索最大轮数（默认: 2）"
     )
     
     # LLM参数
@@ -503,12 +526,28 @@ def main():
                     custom_space=custom_space
                 )
                 
-                # 执行优化
-                if not args.quiet:
-                    print(f"\n[优化] 开始优化（{args.trials} 次试验）...")
-                    print(f"[优化] 预计时间: {args.trials // 2} - {args.trials} 秒\n")
+                # 执行优化（v2.0 新增参数）
+                use_enhanced = not args.no_enhanced_sampler
+                enable_dynamic = not args.no_dynamic_trials
+                enable_boundary = not args.no_boundary_search
                 
-                result = optimizer.optimize(n_trials=args.trials)
+                if not args.quiet:
+                    print(f"\n[优化] 开始优化...")
+                    print(f"[优化] 基础试验次数: {args.trials}")
+                    if use_enhanced:
+                        print(f"[优化] 采样策略: 正态分布 + 贝叶斯优化")
+                    if enable_dynamic:
+                        print(f"[优化] 动态试验: 启用（将根据参数量自动调整）")
+                    if enable_boundary:
+                        print(f"[优化] 边界二次搜索: 启用（最多{args.max_boundary_rounds}轮）\n")
+                
+                result = optimizer.optimize(
+                    n_trials=args.trials,
+                    use_enhanced_sampler=use_enhanced,
+                    enable_dynamic_trials=enable_dynamic,
+                    auto_expand_boundary=enable_boundary,
+                    max_expansion_rounds=args.max_boundary_rounds
+                )
                 
                 # 打印和保存结果
                 print_results(result, asset_output_dir, original_asset_name)
