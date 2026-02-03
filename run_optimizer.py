@@ -120,9 +120,13 @@ def prepare_data(data_path: str) -> str:
     df = pd.read_csv(data_path)
     
     # 检查并重命名日期列
-    if 'date' in df.columns and 'datetime' not in df.columns:
-        df.rename(columns={'date': 'datetime'}, inplace=True)
-        print(f"[数据] 已将 'date' 列重命名为 'datetime'")
+    if 'datetime' not in df.columns:
+        if 'date' in df.columns:
+            df.rename(columns={'date': 'datetime'}, inplace=True)
+            print(f"[数据] 已将 'date' 列重命名为 'datetime'")
+        elif 'time_key' in df.columns:
+            df.rename(columns={'time_key': 'datetime'}, inplace=True)
+            print(f"[数据] 已将 'time_key' 列重命名为 'datetime'")
     
     if 'datetime' not in df.columns:
         raise ValueError("数据文件必须包含 'datetime' 或 'date' 列")
@@ -294,6 +298,17 @@ def main():
         required=True,
         help="策略脚本文件路径（.py文件，必须包含继承 bt.Strategy 的策略类）"
     )
+    parser.add_argument(
+        "--multi-data",
+        action="store_true",
+        help="将多个 --data 文件作为同一策略的多数据源输入（顺序即数据源顺序）"
+    )
+    parser.add_argument(
+        "--data-names",
+        nargs='+',
+        default=None,
+        help="多数据源的名称列表（需与 --data 数量一致，例如 QQQ TQQQ）"
+    )
     
     # 优化参数
     parser.add_argument(
@@ -396,7 +411,8 @@ def main():
         # 尝试通配符匹配
         matched = glob.glob(pattern)
         if matched:
-            data_files.extend(matched)
+            # 保持通配符匹配的局部顺序
+            data_files.extend(sorted(matched))
         elif Path(pattern).exists():
             # 不是通配符，是直接的文件路径
             data_files.append(pattern)
@@ -404,14 +420,33 @@ def main():
             print(f"❌ 错误: 数据文件不存在: {pattern}")
             return 1
     
-    # 去重并过滤非 CSV 文件
-    data_files = list(set(data_files))
+    # 过滤非 CSV 文件
     data_files = [f for f in data_files if f.endswith('.csv')]
-    data_files.sort()  # 排序以保证顺序一致
+    
+    # 根据模式处理去重/排序
+    if args.multi_data:
+        # 保持顺序去重（多数据源顺序很重要）
+        seen = set()
+        ordered_files = []
+        for f in data_files:
+            if f not in seen:
+                seen.add(f)
+                ordered_files.append(f)
+        data_files = ordered_files
+    else:
+        # 批量优化时去重排序
+        data_files = list(set(data_files))
+        data_files.sort()  # 排序以保证顺序一致
     
     if not data_files:
         print("❌ 错误: 未找到有效的 CSV 数据文件")
         return 1
+    
+    # 多数据源模式下，校验 data_names
+    if args.multi_data and args.data_names:
+        if len(args.data_names) != len(data_files):
+            print("❌ 错误: --data-names 数量必须与 --data 文件数量一致")
+            return 1
     
     # 验证策略文件存在
     if not Path(args.strategy).exists():
@@ -488,26 +523,36 @@ def main():
         output_dir = Path(args.output)
         output_dir.mkdir(parents=True, exist_ok=True)
         
-        # 3. 批量优化每个数据文件
+        # 3. 批量优化每个数据文件 / 多数据源优化
         all_results = []
         success_count = 0
         fail_count = 0
         
-        for idx, data_file in enumerate(data_files, 1):
-            # 提取原始资产名称（去除 _processed 后缀）
-            original_asset_name = Path(data_file).stem.replace('_processed', '')
-            
+        if args.multi_data:
+            # 多数据源模式：所有数据文件作为同一策略的多数据输入
             if not args.quiet:
                 print("\n" + "="*60)
-                print(f"📈 [{idx}/{len(data_files)}] 开始优化: {original_asset_name}")
+                print(f"📈 [多数据源] 开始优化: {len(data_files)} 个数据源")
+                for i, f in enumerate(data_files, 1):
+                    print(f"  [{i}] {f}")
                 print("="*60)
             
             try:
-                # 准备数据
-                data_path = prepare_data(data_file)
+                # 准备数据（逐个处理）
+                processed_paths = []
+                for data_file in data_files:
+                    processed_paths.append(prepare_data(data_file))
                 
-                # 创建该资产的输出子目录
-                asset_output_dir = output_dir / original_asset_name
+                # 数据源名称
+                if args.data_names:
+                    data_names = args.data_names
+                else:
+                    data_names = [Path(p).stem.replace('_processed', '') for p in processed_paths]
+                
+                asset_label = "+".join(data_names)
+                
+                # 创建输出子目录
+                asset_output_dir = output_dir / asset_label
                 asset_output_dir.mkdir(parents=True, exist_ok=True)
                 
                 # 创建优化器
@@ -515,7 +560,7 @@ def main():
                     print("\n[优化器] 初始化中...")
                 
                 optimizer = UniversalOptimizer(
-                    data_path=data_path,
+                    data_path=processed_paths,
                     strategy_path=str(Path(args.strategy).absolute()),
                     objective=args.objective,
                     use_llm=args.use_llm,
@@ -523,10 +568,11 @@ def main():
                     output_dir=str(asset_output_dir),
                     verbose=not args.quiet,
                     target_params=target_params,
-                    custom_space=custom_space
+                    custom_space=custom_space,
+                    data_names=data_names
                 )
                 
-                # 执行优化（v2.0 新增参数）
+                # 执行优化
                 use_enhanced = not args.no_enhanced_sampler
                 enable_dynamic = not args.no_dynamic_trials
                 enable_boundary = not args.no_boundary_search
@@ -550,27 +596,105 @@ def main():
                 )
                 
                 # 打印和保存结果
-                print_results(result, asset_output_dir, original_asset_name)
+                print_results(result, asset_output_dir, asset_label)
                 
                 # 记录结果
                 all_results.append({
-                    'asset': original_asset_name,
+                    'asset': asset_label,
                     'status': 'success',
                     'result': result
                 })
                 success_count += 1
                 
             except Exception as e:
-                print(f"\n❌ 优化 {original_asset_name} 失败: {e}")
+                print(f"\n❌ 多数据源优化失败: {e}")
                 import traceback
                 traceback.print_exc()
                 all_results.append({
-                    'asset': original_asset_name,
+                    'asset': 'multi_data',
                     'status': 'failed',
                     'error': str(e)
                 })
                 fail_count += 1
-                continue
+        else:
+            for idx, data_file in enumerate(data_files, 1):
+                # 提取原始资产名称（去除 _processed 后缀）
+                original_asset_name = Path(data_file).stem.replace('_processed', '')
+                
+                if not args.quiet:
+                    print("\n" + "="*60)
+                    print(f"📈 [{idx}/{len(data_files)}] 开始优化: {original_asset_name}")
+                    print("="*60)
+                
+                try:
+                    # 准备数据
+                    data_path = prepare_data(data_file)
+                    
+                    # 创建该资产的输出子目录
+                    asset_output_dir = output_dir / original_asset_name
+                    asset_output_dir.mkdir(parents=True, exist_ok=True)
+                    
+                    # 创建优化器
+                    if not args.quiet:
+                        print("\n[优化器] 初始化中...")
+                    
+                    optimizer = UniversalOptimizer(
+                        data_path=data_path,
+                        strategy_path=str(Path(args.strategy).absolute()),
+                        objective=args.objective,
+                        use_llm=args.use_llm,
+                        llm_config=llm_config,
+                        output_dir=str(asset_output_dir),
+                        verbose=not args.quiet,
+                        target_params=target_params,
+                        custom_space=custom_space
+                    )
+                    
+                    # 执行优化（v2.0 新增参数）
+                    use_enhanced = not args.no_enhanced_sampler
+                    enable_dynamic = not args.no_dynamic_trials
+                    enable_boundary = not args.no_boundary_search
+                    
+                    if not args.quiet:
+                        print(f"\n[优化] 开始优化...")
+                        print(f"[优化] 基础试验次数: {args.trials}")
+                        if use_enhanced:
+                            print(f"[优化] 采样策略: 正态分布 + 贝叶斯优化")
+                        if enable_dynamic:
+                            print(f"[优化] 动态试验: 启用（将根据参数量自动调整）")
+                        if enable_boundary:
+                            print(f"[优化] 边界二次搜索: 启用（最多{args.max_boundary_rounds}轮）\n")
+                    
+                    result = optimizer.optimize(
+                        n_trials=args.trials,
+                        use_enhanced_sampler=use_enhanced,
+                        enable_dynamic_trials=enable_dynamic,
+                        auto_expand_boundary=enable_boundary,
+                        max_expansion_rounds=args.max_boundary_rounds
+                    )
+                    
+                    # 打印和保存结果
+                    print_results(result, asset_output_dir, original_asset_name)
+                    
+                    # 记录结果
+                    all_results.append({
+                        'asset': original_asset_name,
+                        'status': 'success',
+                        'result': result
+                    })
+                    success_count += 1
+                    
+                except Exception as e:
+                    print(f"\n❌ 优化 {original_asset_name} 失败: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    all_results.append({
+                        'asset': original_asset_name,
+                        'status': 'failed',
+                        'error': str(e)
+                    })
+                    fail_count += 1
+                    continue
         
         # 4. 打印批量优化汇总
         print("\n" + "="*60)

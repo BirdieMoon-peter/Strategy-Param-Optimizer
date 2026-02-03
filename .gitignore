@@ -81,3 +81,5 @@ optimization_results/
 参数空间优化指南.md
 results/
 project_trend/
+*.csv
+multivwap/

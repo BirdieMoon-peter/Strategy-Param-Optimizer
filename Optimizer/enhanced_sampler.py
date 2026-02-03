@@ -351,7 +351,7 @@ class ParallelExplorer:
             (最佳参数, 最佳值, 所有结果列表)
         """
         # 生成初始样本
-        samples = sampler.generate_initial_samples(
+        samples, _ = sampler.generate_initial_samples(
             search_space=search_space,
             n_samples=n_samples,
             default_params=default_params,
@@ -667,7 +667,7 @@ if __name__ == "__main__":
     
     # 生成样本
     print("\n正态分布采样测试:")
-    samples = sampler.generate_initial_samples(
+    samples, _ = sampler.generate_initial_samples(
         search_space=search_space,
         n_samples=10,
         default_params={'period': 50, 'std_dev': 2.0, 'threshold': 0.1}

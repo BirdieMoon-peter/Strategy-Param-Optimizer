@@ -424,7 +424,8 @@ class BacktestEngine:
         data: pd.DataFrame = None,
         params: Dict[str, Any] = None,
         asset_name: str = "ASSET",
-        calculate_yearly: bool = True
+        calculate_yearly: bool = True,
+        data_names: Optional[list] = None
     ) -> Optional[BacktestResult]:
         """
         运行单次回测
@@ -456,21 +457,45 @@ class BacktestEngine:
             cerebro.broker.setcash(self.config.initial_cash)
             cerebro.broker.setcommission(commission=self.config.commission)
             
-            # 准备数据：确保 datetime 是索引
-            data_copy = data.copy()
-            if 'datetime' in data_copy.columns:
-                data_copy['datetime'] = pd.to_datetime(data_copy['datetime'])
-                data_copy = data_copy.set_index('datetime')
-            elif 'date' in data_copy.columns:
-                data_copy['date'] = pd.to_datetime(data_copy['date'])
-                data_copy = data_copy.set_index('date')
+            def _prepare_df(df: pd.DataFrame) -> pd.DataFrame:
+                data_copy = df.copy()
+                if 'datetime' in data_copy.columns:
+                    data_copy['datetime'] = pd.to_datetime(data_copy['datetime'])
+                    data_copy = data_copy.set_index('datetime')
+                elif 'date' in data_copy.columns:
+                    data_copy['date'] = pd.to_datetime(data_copy['date'])
+                    data_copy = data_copy.set_index('date')
+                elif 'time_key' in data_copy.columns:
+                    data_copy['time_key'] = pd.to_datetime(data_copy['time_key'])
+                    data_copy = data_copy.set_index('time_key')
+                
+                # 确保列名小写
+                data_copy.columns = [col.lower() for col in data_copy.columns]
+                return data_copy
             
-            # 确保列名小写
-            data_copy.columns = [col.lower() for col in data_copy.columns]
-            
-            # 添加数据
-            bt_data = bt.feeds.PandasData(dataname=data_copy, name=asset_name)
-            cerebro.adddata(bt_data)
+            # 添加数据（支持单数据/多数据源）
+            if isinstance(data, dict):
+                for name, df in data.items():
+                    prepared = _prepare_df(df)
+                    bt_data = bt.feeds.PandasData(dataname=prepared, name=name)
+                    cerebro.adddata(bt_data)
+            elif isinstance(data, (list, tuple)):
+                # 确定数据源名称
+                if data_names and len(data_names) == len(data):
+                    names = data_names
+                elif isinstance(asset_name, (list, tuple)) and len(asset_name) == len(data):
+                    names = list(asset_name)
+                else:
+                    names = [f"ASSET{i+1}" for i in range(len(data))]
+                
+                for df, name in zip(data, names):
+                    prepared = _prepare_df(df)
+                    bt_data = bt.feeds.PandasData(dataname=prepared, name=name)
+                    cerebro.adddata(bt_data)
+            else:
+                prepared = _prepare_df(data)
+                bt_data = bt.feeds.PandasData(dataname=prepared, name=asset_name)
+                cerebro.adddata(bt_data)
             
             # 添加策略
             cerebro.addstrategy(strategy_class, **params)
@@ -577,6 +602,12 @@ class BacktestEngine:
         yearly_drawdowns = {}
         yearly_sharpe = {}
         
+        # 多数据源时，使用第一个数据源计算年度指标
+        if isinstance(data, dict):
+            data = list(data.values())[0] if data else data
+        elif isinstance(data, (list, tuple)):
+            data = data[0] if data else data
+        
         # 确保数据有日期索引
         data_copy = data.copy()
         if 'datetime' in data_copy.columns:
@@ -585,6 +616,9 @@ class BacktestEngine:
         elif 'date' in data_copy.columns:
             data_copy['date'] = pd.to_datetime(data_copy['date'])
             data_copy = data_copy.set_index('date')
+        elif 'time_key' in data_copy.columns:
+            data_copy['time_key'] = pd.to_datetime(data_copy['time_key'])
+            data_copy = data_copy.set_index('time_key')
         elif not isinstance(data_copy.index, pd.DatetimeIndex):
             # 如果没有日期列且索引不是日期，返回空字典
             return {'returns': {}, 'drawdowns': {}, 'sharpe': {}}

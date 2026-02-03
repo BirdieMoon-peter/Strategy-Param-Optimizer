@@ -245,7 +245,8 @@ class BayesianOptimizer:
         n_trials: int = None,
         verbose: bool = True,
         default_params: Dict[str, Any] = None,
-        use_enhanced_sampler: bool = True
+        use_enhanced_sampler: bool = True,
+        enable_dynamic_trials: bool = True
     ) -> OptimizationResult:
         """
         单目标优化（支持两阶段优化）
@@ -267,7 +268,7 @@ class BayesianOptimizer:
         n_params = len(search_space) if search_space else 0
         
         # 动态计算试验次数（如果启用增强采样器）
-        if use_enhanced_sampler and ENHANCED_SAMPLER_AVAILABLE and n_params > 0:
+        if enable_dynamic_trials and use_enhanced_sampler and ENHANCED_SAMPLER_AVAILABLE and n_params > 0:
             config = SamplerConfig()
             calculator = DynamicTrialsCalculator(config)
             recommended_trials, exploration_trials, exploitation_trials = \
