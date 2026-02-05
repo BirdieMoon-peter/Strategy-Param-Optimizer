@@ -15,12 +15,22 @@
 ✅ **两阶段优化** - 🆕 v2.1 探索阶段（正态分布）+ 利用阶段（贝叶斯TPE），平衡探索与利用  
 ✅ **动态试验次数** - 🆕 v2.1 根据参数数量自动调整试验次数，确保充分探索  
 ✅ **边界二次搜索** - 🆕 v2.1 智能检测边界参数，自动扩展范围并进行针对性搜索  
+✅ **双模式指标计算** - 🆕 v2.2 支持 trade_log 精确计算和 empyrical 专业指标两种模式  
+✅ **分钟数据优化** - 🆕 v2.2 完善的日内数据处理和年化机制，自动聚合为日收益率  
 ✅ **专业指标计算** - 使用 pyfolio/empyrical 框架计算专业金融指标（Sharpe、Sortino、Calmar、Omega等）  
 ✅ **参数空间分析** - 自动分析优化结果，给出参数空间改进建议  
 ✅ **选择性优化** - 支持指定要优化的参数，其他参数保持默认值  
 ✅ **LLM集成** - 可选集成大语言模型进行智能参数分析  
 ✅ **命令行友好** - 简单易用的命令行接口，支持批处理  
 ✅ **详细输出** - 生成JSON格式结果和可读的文本摘要
+
+### 📚 快速导航
+
+- **回测指标计算** → [🎯 回测指标计算方法](#-回测指标计算方法)
+- **分钟数据处理** → [分钟数据处理机制](#分钟数据处理机制)
+- **策略要求** → [🔧 策略脚本要求](#-策略脚本要求)
+- **最佳实践** → [📝 最佳实践](#-最佳实践)
+- **常见问题** → [❓ 常见问题](#-常见问题)
 
 ---
 
@@ -343,6 +353,187 @@ python run_optimizer.py \
 
 ---
 
+## 🎯 回测指标计算方法
+
+调参工具使用**双引擎计算模式**，根据策略类型自动选择最佳计算方式。
+
+### 计算模式选择逻辑
+
+```
+策略是否有 trade_log？
+    ├─ 是 → 使用 trade_log 模式（精确计算）
+    └─ 否 → 使用 empyrical 模式（专业指标）
+```
+
+### 模式1: trade_log 精确计算（默认优先）
+
+**适用场景：** 策略手动维护 `self.trade_log` 属性（如您的 multivwap2.py 策略）
+
+**计算流程：**
+1. **提取交易记录**：读取策略的 `trade_log`（每笔交易的完整信息）
+2. **按日聚合**：将分钟级交易按日期分组，汇总每日盈亏
+   ```python
+   日期2024-01-15: 交易1(+150) + 交易2(-50) + 交易3(+200) = +300元
+   日期2024-01-16: 交易4(-100) = -100元
+   ```
+3. **构建资产曲线**：从初始资金开始累加每日盈亏
+   ```python
+   第0天: 100,000 (初始)
+   第1天: 100,300 (+300)
+   第2天: 100,200 (-100)
+   ```
+4. **计算日收益率**：`(当日资产 - 前日资产) / 前日资产`
+5. **计算核心指标**：
+   - **夏普比率** = (日均收益 / 日收益标准差) × √252
+   - **最大回撤** = min((资产值 - 历史最高) / 历史最高)
+   - **年化收益** = (期末资产/期初资产)^(1/年数) - 1
+   - **胜率** = 盈利交易数 / 总交易数
+   - **盈亏比** = 平均盈利 / 平均亏损
+
+**关键特点：**
+- ✅ **分钟级精度**：保留每笔交易的完整细节
+- ✅ **手续费透明**：使用策略自己计算的净盈亏
+- ✅ **自动转换**：最终转为日收益率进行年化
+- ✅ **适合高频**：特别适合日内分钟级策略
+
+**代码位置：** [`Optimizer/backtest_engine.py:400-510`](Optimizer/backtest_engine.py#L400-L510)
+
+---
+
+### 模式2: empyrical 专业指标（降级方案）
+
+**适用场景：** 策略未维护 `trade_log`，或设置 `use_trade_log_metrics=False`
+
+**计算流程：**
+1. **获取收益率**：使用 backtrader 的 `TimeReturn` 分析器
+   - 日内数据：自动使用 `timeframe=bt.TimeFrame.Days` 获取日收益率
+   - 日线数据：直接使用原始频率
+2. **empyrical 计算**：调用专业金融库计算指标
+   ```python
+   from empyrical import sharpe_ratio, sortino_ratio, calmar_ratio
+   sharpe = sharpe_ratio(daily_returns, risk_free=0, period='daily')
+   ```
+3. **支持的指标**：
+   - **Sharpe Ratio**：夏普比率（收益/波动）
+   - **Sortino Ratio**：索提诺比率（只考虑下行风险）
+   - **Calmar Ratio**：卡玛比率（收益/最大回撤）
+   - **Omega Ratio**：欧米伽比率（收益概率/损失概率）
+   - **Value at Risk**：95%置信度最大损失
+   - **Tail Ratio**：尾部比率（右尾/左尾）
+   - **Annual Volatility**：年化波动率
+
+**关键特点：**
+- ✅ **专业标准**：使用量化金融行业标准库
+- ✅ **指标丰富**：提供多维度风险评估
+- ✅ **自动重采样**：日内数据自动转为日收益率
+- ✅ **兼容性强**：适用于任意 backtrader 策略
+
+**代码位置：** [`Optimizer/backtest_engine.py:80-380`](Optimizer/backtest_engine.py#L80-L380)
+
+---
+
+### 分钟数据处理机制
+
+**问题：** 分钟级策略如何计算年化指标？
+
+**解决方案：** 两阶段处理
+
+#### 阶段1：数据聚合
+```python
+# backtest_engine.py 第816-819行
+is_intraday = _is_intraday_frequency(self.config.data_frequency)
+if is_intraday:
+    cerebro.addanalyzer(bt.analyzers.TimeReturn, _name='timereturn',
+                       timeframe=bt.TimeFrame.Days)
+```
+
+**作用：** 在 backtrader 回测时，将分钟级收益率自动聚合为日收益率
+- 公式：`日收益 = (1+r1) × (1+r2) × ... × (1+rn) - 1`
+- 示例：某日9:30赚0.1%，10:30亏0.05%，11:30赚0.2% → 日收益 = 1.001 × 0.9995 × 1.002 - 1 ≈ 0.25%
+
+#### 阶段2：年化计算
+```python
+# 使用252个交易日作为年化因子
+sharpe_ratio = (日均收益 / 日收益标准差) × √252
+年化收益率 = (1 + 总收益率)^(252/交易日数) - 1
+```
+
+**为什么是252？**
+- 美股一年约252个交易日
+- 行业标准惯例
+- 便于不同频率策略对比
+
+---
+
+### 配置选项
+
+在 [`Optimizer/config.py`](Optimizer/config.py) 中配置：
+
+```python
+class BacktestConfig:
+    initial_cash: float = 100000.0           # 初始资金
+    commission: float = 0.0002               # 手续费率
+    data_frequency: str = 'daily'            # 数据频率: 'daily', '1m', '5m' 等
+    
+# 年化因子配置（自动使用）
+DATA_FREQUENCY_ANNUALIZATION = {
+    '1m': 252,      # 分钟数据聚合为日后使用252
+    '5m': 252,
+    '15m': 252,
+    'daily': 252,
+    'weekly': 52,
+}
+```
+
+在 `BacktestEngine` 初始化时指定：
+
+```python
+engine = BacktestEngine(
+    config=config,
+    use_trade_log_metrics=True,  # 默认True，优先使用trade_log
+    data_frequency='1m'           # 声明数据频率
+)
+```
+
+---
+
+### 两种模式对比
+
+| 维度 | trade_log 模式 | empyrical 模式 |
+|------|---------------|---------------|
+| **数据来源** | 策略手动记录的交易日志 | backtrader 时间收益率分析器 |
+| **计算时机** | 策略运行时实时记录 | 回测结束后计算 |
+| **精度** | ✅ 分钟级精度 | 日级或更低频 |
+| **手续费** | ✅ 策略明确计算 | 依赖分析器自动提取 |
+| **指标范围** | 基础指标（Sharpe、回撤、胜率） | ✅ 专业指标（Sortino、Calmar、Omega等） |
+| **适用策略** | 高频日内策略 | 通用策略 |
+| **数据要求** | 需策略维护 `trade_log` | 无特殊要求 |
+| **计算速度** | 快 | 稍慢（需empyrical计算） |
+
+---
+
+### 验证一致性
+
+建议运行一次回测，对比两种模式的结果：
+
+```python
+# 方法1：使用 trade_log
+engine1 = BacktestEngine(use_trade_log_metrics=True)
+result1 = engine1.run_backtest(...)
+print(f"trade_log Sharpe: {result1.sharpe_ratio}")
+
+# 方法2：使用 empyrical
+engine2 = BacktestEngine(use_trade_log_metrics=False)
+result2 = engine2.run_backtest(...)
+print(f"empyrical Sharpe: {result2.sharpe_ratio}")
+
+# 差异应小于5%
+diff = abs(result1.sharpe_ratio - result2.sharpe_ratio) / result1.sharpe_ratio
+assert diff < 0.05, "两种模式结果差异过大，需检查计算逻辑"
+```
+
+---
+
 ## 📊 数据格式要求
 
 ### CSV文件格式
@@ -417,6 +608,75 @@ class MyStrategy(bt.Strategy):
         ('period', 20),      # 整数参数
         ('threshold', 0.02), # 浮点参数
     )
+
+### 高级示例：带 trade_log 的策略（推荐用于高频策略）
+
+```python
+import backtrader as bt
+
+class MyIntradayStrategy(bt.Strategy):
+    params = (
+        ('period', 20),
+        ('threshold', 0.02),
+    )
+    
+    def __init__(self):
+        super().__init__()
+        # 初始化交易日志（用于精确指标计算）
+        self.trade_log = []
+        self.entry_price = {}
+        self.entry_comm = {}
+    
+    def notify_order(self, order):
+        if order.status not in [order.Completed]:
+            return
+        
+        asset = order.data._name
+        
+        if order.isbuy():
+            # 记录买入信息
+            self.entry_price[asset] = order.executed.price
+            self.entry_comm[asset] = order.executed.comm
+            self.entry_time[asset] = self.data.datetime.datetime(0)
+        
+        elif order.issell():
+            # 计算本次交易的盈亏
+            entry_p = self.entry_price.get(asset, 0)
+            exit_p = order.executed.price
+            size = abs(order.executed.size)
+            
+            # 总盈亏 = (卖出价 - 买入价) × 手数
+            gross_pnl = (exit_p - entry_p) * size
+            
+            # 净盈亏 = 总盈亏 - 手续费
+            entry_comm = self.entry_comm.get(asset, 0)
+            exit_comm = order.executed.comm
+            net_pnl = gross_pnl - entry_comm - exit_comm
+            
+            # 收益率 = 净盈亏 / (买入价 × 手数)
+            trade_return = (net_pnl / (entry_p * size)) * 100 if entry_p > 0 else 0
+            
+            # 记录交易日志
+            self.trade_log.append({
+                'entry_datetime': self.entry_time[asset],
+                'exit_datetime': self.data.datetime.datetime(0),
+                'entry_price': entry_p,
+                'exit_price': exit_p,
+                'size': size,
+                'pnl': net_pnl,
+                'return_pct': trade_return,
+                'gross_pnl': gross_pnl,
+                'commission': entry_comm + exit_comm,
+                'final_portfolio_value': self.broker.getvalue()
+            })
+```
+
+**trade_log 必需字段：**
+- `entry_datetime`: 进场时间
+- `exit_datetime`: 出场时间
+- `pnl`: 净盈亏（已扣除手续费）
+- `return_pct`: 收益率百分比（可选，用于统计）
+- `final_portfolio_value`: 交易后账户总值（可选）
     
     def __init__(self):
         self.sma = bt.indicators.SMA(self.data.close, period=self.params.period)
@@ -523,6 +783,71 @@ done
 
 3. **使用默认规则**：如果默认范围（0.5x - 2.0x）可以接受，直接使用即可
 
+### Q7: 分钟数据的回测指标为什么和预期不一样？
+
+**常见原因：**
+1. **年化因子混淆**：分钟数据聚合为日收益率后使用252年化，而非390×252
+2. **手续费计算**：trade_log 模式使用策略手动计算的净盈亏，可能与 backtrader 自动提取不同
+3. **数据聚合方式**：日内多笔交易会合并为一个日收益率
+
+**解决方案：**
+```python
+# 确保策略声明数据频率
+class MyStrategy(bt.Strategy):
+    def __init__(self):
+        self.data_frequency = '1m'  # 明确声明
+        
+# 确保 BacktestEngine 正确配置
+engine = BacktestEngine(
+    data_frequency='1m',           # 声明数据频率
+    use_trade_log_metrics=True     # 使用精确计算
+)
+```
+
+**验证方法：**
+```python
+# 检查日志输出
+# 应该看到类似：
+# "检测到日内数据频率: 1m，使用日收益率聚合"
+# "使用 trade_log 计算指标，共 XXX 笔交易"
+```
+
+### Q8: trade_log 和 empyrical 两种模式结果差异大怎么办？
+
+**差异在5%以内**：正常，两种计算方式略有不同
+**差异超过10%**：需要排查
+
+**排查步骤：**
+1. **检查手续费**：
+   ```python
+   # trade_log 模式
+   net_pnl = gross_pnl - entry_comm - exit_comm
+   
+   # empyrical 模式依赖 backtrader 自动提取
+   # 确保佣金设置一致
+   ```
+
+2. **检查日期对齐**：
+   ```python
+   # trade_log: 按 entry_datetime 聚合
+   df['date'] = pd.to_datetime(df['entry_datetime']).dt.date
+   
+   # empyrical: 使用 TimeReturn 分析器的时间戳
+   # 确保两者对齐
+   ```
+
+3. **检查资产曲线**：
+   ```python
+   # 打印每日资产值，对比两种方式
+   print("trade_log 资产曲线:", daily_values)
+   print("empyrical 资产曲线:", (1 + daily_returns).cumprod())
+   ```
+
+**推荐做法：**
+- 高频策略优先使用 trade_log 模式（更精确）
+- 日线策略使用 empyrical 模式（指标更丰富）
+- 定期验证两种模式的一致性
+
 ---
 
 
@@ -564,7 +889,50 @@ done
 - ✅ **关注VaR和尾部风险**：评估极端市场条件下的表现
 - ✅ **验证边界扩展**：检查是否有参数经历了边界扩展
 
-### 5. LLM使用建议
+### 5. 回测指标计算建议 🆕
+
+#### 高频策略（分钟级）
+- ✅ **推荐使用 trade_log 模式**：在策略中维护 `self.trade_log`
+- ✅ **手动计算PNL**：在 `notify_order()` 中精确计算净盈亏
+- ✅ **记录完整信息**：包括进出场时间、价格、手续费
+- ✅ **设置数据频率**：在配置中声明 `data_frequency='1m'`
+- ✅ **验证聚合结果**：检查日收益率是否合理
+
+**示例：分钟策略的 trade_log 实现**
+```python
+def notify_order(self, order):
+    if order.status == order.Completed:
+        if order.issell():
+            # 计算净盈亏（已扣除手续费）
+            net_pnl = gross_pnl - entry_comm - exit_comm
+            
+            # 记录到 trade_log
+            self.trade_log.append({
+                'entry_datetime': entry_time,
+                'exit_datetime': self.data.datetime.datetime(0),
+                'pnl': net_pnl,
+                'return_pct': net_pnl / cost * 100,
+                'final_portfolio_value': self.broker.getvalue()
+            })
+```
+
+#### 日线策略
+- ✅ **可使用 empyrical 模式**：无需维护 trade_log
+- ✅ **享受专业指标**：自动获得 Sortino、Calmar 等指标
+- ✅ **简化策略代码**：专注交易逻辑，不需要额外记录
+
+#### 对比验证（推荐）
+```bash
+# 第一次运行：使用 trade_log（如果策略支持）
+python run_optimizer.py -d data.csv -s strategy.py --trials 10
+
+# 检查输出的 sharpe_ratio 和 annual_return
+
+# （可选）修改策略移除 trade_log，再次运行对比
+# 两次结果差异应小于5%
+```
+
+### 6. LLM使用建议
 
 - ✅ 仅在参数空间复杂时使用LLM
 - ✅ 本地Ollama适合频繁使用

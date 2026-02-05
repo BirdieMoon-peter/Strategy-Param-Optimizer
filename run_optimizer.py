@@ -334,6 +334,14 @@ def main():
         help="参数空间配置文件（JSON格式），用于手动指定参数搜索范围，参考 space_config_example.json"
     )
     
+    # 数据频率参数
+    parser.add_argument(
+        "--data-freq", "-f",
+        default=None,
+        choices=["daily", "1m", "5m", "15m", "30m", "hourly", "auto"],
+        help="数据频率（默认: auto自动检测）。daily=日线, 1m=1分钟, 5m=5分钟, 15m=15分钟, 30m=30分钟, hourly=小时线"
+    )
+    
     # v2.0 新增：增强采样器参数
     parser.add_argument(
         "--no-enhanced-sampler",
@@ -569,7 +577,8 @@ def main():
                     verbose=not args.quiet,
                     target_params=target_params,
                     custom_space=custom_space,
-                    data_names=data_names
+                    data_names=data_names,
+                    data_frequency=args.data_freq
                 )
                 
                 # 执行优化
@@ -647,7 +656,8 @@ def main():
                         output_dir=str(asset_output_dir),
                         verbose=not args.quiet,
                         target_params=target_params,
-                        custom_space=custom_space
+                        custom_space=custom_space,
+                        data_frequency=args.data_freq
                     )
                     
                     # 执行优化（v2.0 新增参数）

@@ -52,6 +52,7 @@ class UniversalOptimizer:
     2. 动态加载策略脚本
     3. 支持多种LLM API
     4. 输出JSON格式的优化结果
+    5. 支持多种数据频率（日线、分钟线等）
     """
     
     def __init__(
@@ -65,7 +66,8 @@ class UniversalOptimizer:
         verbose: bool = True,
         target_params: Optional[List[str]] = None,
         custom_space: Optional[Dict[str, Dict]] = None,
-        data_names: Optional[List[str]] = None
+        data_names: Optional[List[str]] = None,
+        data_frequency: Optional[str] = None
     ):
         """
         初始化优化器
@@ -80,6 +82,8 @@ class UniversalOptimizer:
             verbose: 是否打印详细信息
             target_params: 指定要优化的参数列表，为None时优化所有参数
             custom_space: 自定义参数空间配置，格式: {param_name: {min, max, step, distribution}}
+            data_frequency: 数据频率（'daily', '1m', '5m', '15m', '30m', 'hourly' 等）
+                           为None或'auto'时自动检测
         """
         self.data_path = data_path
         self.strategy_path = strategy_path
@@ -89,6 +93,7 @@ class UniversalOptimizer:
         self.target_params = target_params  # 指定要优化的参数
         self.custom_space = custom_space  # 自定义参数空间
         self.data_names = data_names  # 多数据源名称（可选）
+        self.data_frequency = data_frequency  # 数据频率
         
         # 创建输出目录
         self.output_dir = Path(output_dir)
@@ -122,13 +127,23 @@ class UniversalOptimizer:
             if self.verbose:
                 print(f"[LLM] 初始化成功: {llm_config.api_type} - {llm_config.model_name}")
         
-        # 初始化回测引擎
+        # 初始化回测引擎（传递数据频率，如果是 'auto' 或 None 则自动检测）
+        # 同时传入自定义数据类、手续费类等
+        effective_freq = None if (data_frequency is None or data_frequency == 'auto') else data_frequency
         self.backtest_engine = BacktestEngine(
             data=self.data,
             strategy_class=self.strategy_class,
             initial_cash=100000.0,
-            commission=0.001
+            commission=0.001,
+            data_frequency=effective_freq,
+            custom_data_class=getattr(self, 'custom_data_class', None),
+            custom_commission_class=getattr(self, 'custom_commission_class', None),
+            strategy_module=getattr(self, 'strategy_module', None),
+            use_trade_log_metrics=getattr(self, 'use_trade_log_metrics', False)
         )
+        
+        # 保存检测到的数据频率
+        self.detected_frequency = self.backtest_engine.config.data_frequency
         
         if self.verbose:
             print(f"\n{'='*60}")
@@ -137,7 +152,14 @@ class UniversalOptimizer:
             print(f"标的: {self.asset_name}")
             print(f"策略: {self.strategy_info['class_name']}")
             print(f"优化目标: {objective}")
+            print(f"数据频率: {self.detected_frequency}")
             print(f"使用LLM: {'是' if use_llm else '否'}")
+            if getattr(self, 'custom_data_class', None):
+                print(f"自定义数据类: {self.custom_data_class.__name__}")
+            if getattr(self, 'custom_commission_class', None):
+                print(f"自定义手续费类: {self.custom_commission_class.__name__}")
+            if getattr(self, 'use_trade_log_metrics', False):
+                print(f"指标计算: 基于交易日志 (trade_log)")
             if isinstance(self.data, (list, tuple)):
                 print(f"数据点数: {len(self.data[0])} (多数据源: {len(self.data)} 个)")
             else:
@@ -213,6 +235,9 @@ class UniversalOptimizer:
         sys.modules[module_name] = module
         spec.loader.exec_module(module)
         
+        # 保存策略模块引用，用于后续查找自定义类
+        self.strategy_module = module
+        
         # 查找策略类（继承自backtrader.Strategy）
         strategy_classes = []
         for name, obj in inspect.getmembers(module):
@@ -229,6 +254,41 @@ class UniversalOptimizer:
                 print(f"[警告] 发现多个策略类，将使用第一个: {strategy_classes[0].__name__}")
         
         strategy_class = strategy_classes[0]
+        
+        # 查找自定义数据类（继承自 bt.feeds.PandasData）
+        self.custom_data_class = None
+        for name, obj in inspect.getmembers(module):
+            if (inspect.isclass(obj) and 
+                obj.__module__ == module_name and
+                issubclass(obj, bt.feeds.PandasData) and
+                obj is not bt.feeds.PandasData):
+                self.custom_data_class = obj
+                if self.verbose:
+                    print(f"[策略] 发现自定义数据类: {obj.__name__}")
+                break
+        
+        # 查找自定义手续费类（继承自 bt.CommInfoBase）
+        self.custom_commission_class = None
+        for name, obj in inspect.getmembers(module):
+            if (inspect.isclass(obj) and 
+                obj.__module__ == module_name and
+                issubclass(obj, bt.CommInfoBase) and
+                obj is not bt.CommInfoBase):
+                self.custom_commission_class = obj
+                if self.verbose:
+                    print(f"[策略] 发现自定义手续费类: {obj.__name__}")
+                break
+        
+        # 检查策略是否有 trade_log 属性（用于决定是否使用 trade_log 模式计算指标）
+        self.use_trade_log_metrics = hasattr(strategy_class, '__init__')
+        # 通过检查源码判断是否记录 trade_log
+        try:
+            source = inspect.getsource(strategy_class)
+            self.use_trade_log_metrics = 'trade_log' in source
+            if self.use_trade_log_metrics and self.verbose:
+                print(f"[策略] 检测到 trade_log，将使用交易日志计算指标")
+        except:
+            self.use_trade_log_metrics = False
         
         # 提取策略信息
         strategy_info = {

@@ -208,11 +208,15 @@ class BayesianOptimizer:
             # 建议参数
             params = self._suggest_params(trial, search_space)
             
+            # 在优化模式下自动禁用策略日志
+            run_params = params.copy()
+            run_params['verbose'] = False
+            
             # 运行回测
             result = self.backtest_engine.run_backtest(
                 strategy_class,
                 data,
-                params
+                run_params
             )
             
             if result is None:
@@ -344,8 +348,12 @@ class BayesianOptimizer:
                             else:
                                 print(f"   • {k}: {v}")
                     
+                    # 在优化模式下自动禁用策略日志
+                    run_params = params.copy()
+                    run_params['verbose'] = False
+                    
                     result = self.backtest_engine.run_backtest(
-                        strategy_class, data, params
+                        strategy_class, data, run_params
                     )
                     if result is None:
                         value = float('-inf')
@@ -456,8 +464,10 @@ class BayesianOptimizer:
                 print(f"\n[结果] 探索阶段找到的参数更优!")
         
         # 重新运行最佳参数获取完整回测结果
+        final_params = best_params.copy()
+        final_params['verbose'] = False
         best_result = self.backtest_engine.run_backtest(
-            strategy_class, data, best_params
+            strategy_class, data, final_params
         )
         
         if verbose:

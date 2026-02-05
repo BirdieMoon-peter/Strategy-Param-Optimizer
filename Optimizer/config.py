@@ -149,6 +149,61 @@ OPTIMIZATION_OBJECTIVES = {
 }
 
 
+# ==================== 数据频率配置 ====================
+# 数据频率到年化因子的映射
+# 年化因子 = 每年的交易周期数
+DATA_FREQUENCY_ANNUALIZATION = {
+    'daily': 252,          # 日线：每年252个交易日
+    '1d': 252,
+    'day': 252,
+    'weekly': 52,          # 周线：每年52周
+    '1w': 52,
+    'week': 52,
+    'monthly': 12,         # 月线：每年12个月
+    '1M': 12,
+    'month': 12,
+    'hourly': 252 * 6.5,   # 小时线：假设每天6.5小时交易时间
+    '1h': 252 * 6.5,
+    'hour': 252 * 6.5,
+    '1m': 252 * 390,       # 1分钟线：每天390分钟（美股09:30-16:00）
+    '1min': 252 * 390,
+    'minute': 252 * 390,
+    '5m': 252 * 78,        # 5分钟线：每天78个5分钟周期
+    '5min': 252 * 78,
+    '15m': 252 * 26,       # 15分钟线：每天26个15分钟周期
+    '15min': 252 * 26,
+    '30m': 252 * 13,       # 30分钟线：每天13个30分钟周期
+    '30min': 252 * 13,
+}
+
+
+def get_annualization_factor(data_frequency: str) -> float:
+    """
+    获取年化因子
+    
+    Args:
+        data_frequency: 数据频率（如 'daily', '1m', '5m' 等）
+        
+    Returns:
+        年化因子
+    """
+    freq_lower = data_frequency.lower().strip()
+    if freq_lower in DATA_FREQUENCY_ANNUALIZATION:
+        return DATA_FREQUENCY_ANNUALIZATION[freq_lower]
+    
+    # 尝试解析自定义分钟数 (如 '3m', '10m' 等)
+    import re
+    match = re.match(r'^(\d+)m(in)?$', freq_lower)
+    if match:
+        minutes = int(match.group(1))
+        bars_per_day = 390 // minutes  # 假设每天390分钟交易
+        return 252 * bars_per_day
+    
+    # 默认使用日线
+    print(f"[警告] 未知的数据频率 '{data_frequency}'，使用默认日线年化因子252")
+    return 252
+
+
 # ==================== 回测配置 ====================
 @dataclass
 class BacktestConfig:
@@ -157,6 +212,7 @@ class BacktestConfig:
     commission: float = 0.0005
     start_date: str = "2021-01-01"
     slippage: float = 0.0
+    data_frequency: str = "daily"  # 数据频率：daily, 1m, 5m, 15m, 30m, hourly 等
 
 
 # ==================== 贝叶斯优化配置 ====================
