@@ -378,7 +378,25 @@ class DynamicTrialsCalculator:
     动态试验次数计算器
     
     根据参数数量和参数空间复杂度自动调整试验次数
+    
+    算法原理:
+    1. 基础公式: trials = base + n_params × per_param
+    2. 复杂度调整: 根据参数类型、范围跨度、离散度调整
+    3. 维度诅咒补偿: 高维空间需要指数级更多采样点
+    4. 收敛保障: 确保每个参数至少有足够的探索次数
     """
+    
+    # 推荐配置（基于经验和理论）
+    RECOMMENDED_TRIALS_PER_PARAM = {
+        1: 30,   # 1个参数: 30次足够
+        2: 50,   # 2个参数: 50次
+        3: 70,   # 3个参数: 70次
+        4: 90,   # 4个参数: 90次
+        5: 110,  # 5个参数: 110次
+        6: 130,  # 6个参数: 130次
+        7: 150,  # 7个参数: 150次
+        8: 170,  # 8+参数: 线性增长
+    }
     
     def __init__(self, config: SamplerConfig = None):
         """
@@ -401,7 +419,7 @@ class DynamicTrialsCalculator:
         Args:
             n_params: 参数数量
             search_space: 搜索空间（用于分析复杂度）
-            user_trials: 用户指定的试验次数（优先级最高）
+            user_trials: 用户指定的试验次数（作为最小值参考）
             
         Returns:
             (总试验次数, 探索阶段次数, 利用阶段次数)
@@ -413,24 +431,15 @@ class DynamicTrialsCalculator:
             exploitation = total - exploration
             return total, exploration, exploitation
         
-        # 计算基础试验次数
-        base = self.config.base_trials
-        per_param = self.config.trials_per_param
-        
-        # 基于参数数量的线性增长
-        calculated = base + n_params * per_param
-        
-        # 分析搜索空间复杂度（如果提供）
-        if search_space:
-            complexity_factor = self._analyze_space_complexity(search_space)
-            calculated = int(calculated * complexity_factor)
-        
-        # 应用边界限制
-        calculated = max(self.config.min_trials, min(self.config.max_trials, calculated))
+        # 使用改进的算法计算试验次数
+        calculated = self._calculate_optimal_trials(n_params, search_space)
         
         # 如果用户指定了试验次数，取较大值
         if user_trials:
             calculated = max(calculated, user_trials)
+        
+        # 应用边界限制
+        calculated = max(self.config.min_trials, min(self.config.max_trials, calculated))
         
         # 计算探索和利用阶段的分配
         exploration = int(calculated * self.config.exploration_ratio)
@@ -438,39 +447,121 @@ class DynamicTrialsCalculator:
         
         return calculated, exploration, exploitation
     
-    def _analyze_space_complexity(self, search_space: Dict[str, Any]) -> float:
+    def _calculate_optimal_trials(
+        self,
+        n_params: int,
+        search_space: Dict[str, Any] = None
+    ) -> int:
         """
-        分析搜索空间复杂度
+        计算最优试验次数（核心算法）
         
-        返回复杂度因子（1.0 为基准）
+        使用多因素综合评估:
+        1. 参数数量（维度）
+        2. 参数类型（整数/浮点）
+        3. 搜索空间大小
+        4. 参数交互复杂度
         
         Args:
+            n_params: 参数数量
             search_space: 搜索空间配置
             
         Returns:
-            复杂度因子
+            推荐试验次数
         """
-        complexity = 1.0
+        # === 1. 基础试验次数（基于参数数量）===
+        if n_params <= 8:
+            # 使用预设的推荐值
+            base_trials = self.RECOMMENDED_TRIALS_PER_PARAM.get(n_params, 170)
+        else:
+            # 8个以上参数：线性增长 + 维度补偿
+            base_trials = 170 + (n_params - 8) * 20
+        
+        # === 2. 复杂度因子调整 ===
+        complexity_factor = 1.0
+        
+        if search_space:
+            complexity_factor = self._analyze_space_complexity_v2(search_space, n_params)
+        
+        # === 3. 应用复杂度调整 ===
+        adjusted_trials = int(base_trials * complexity_factor)
+        
+        return adjusted_trials
+    
+    def _analyze_space_complexity_v2(
+        self,
+        search_space: Dict[str, Any],
+        n_params: int
+    ) -> float:
+        """
+        分析搜索空间复杂度 v2（增强版）
+        
+        考虑因素:
+        1. 参数范围相对大小
+        2. 整数参数的离散度
+        3. 浮点参数的数量级跨度
+        4. 参数间的潜在交互
+        
+        Args:
+            search_space: 搜索空间配置
+            n_params: 参数数量
+            
+        Returns:
+            复杂度因子 (0.7 ~ 1.5)
+        """
+        if not search_space:
+            return 1.0
+        
+        complexity_scores = []
         
         for param_name, config in search_space.items():
-            # 计算参数范围的相对大小
+            score = 1.0
+            
             min_val = config.min_value
             max_val = config.max_value
+            param_type = config.param_type
             
-            if config.param_type == 'int':
-                # 整数参数：可能的值数量
-                n_values = int(max_val) - int(min_val) + 1
-                if n_values > 50:
-                    complexity *= 1.1  # 大范围增加复杂度
+            if param_type == 'int':
+                # 整数参数复杂度
+                n_discrete_values = int(max_val) - int(min_val) + 1
+                
+                if n_discrete_values <= 10:
+                    score = 0.8  # 离散值少，复杂度低
+                elif n_discrete_values <= 30:
+                    score = 1.0  # 中等
+                elif n_discrete_values <= 100:
+                    score = 1.1  # 较多离散值
+                else:
+                    score = 1.2  # 大量离散值
             else:
-                # 浮点参数：检查是否跨越多个数量级
-                if min_val > 0:
+                # 浮点参数复杂度
+                if min_val > 0 and max_val > 0:
                     ratio = max_val / min_val
-                    if ratio > 10:
-                        complexity *= 1.1  # 跨越多个数量级
+                    if ratio <= 3:
+                        score = 0.9  # 窄范围
+                    elif ratio <= 10:
+                        score = 1.0  # 中等范围
+                    elif ratio <= 100:
+                        score = 1.15  # 宽范围
+                    else:
+                        score = 1.25  # 跨多个数量级
+                else:
+                    # 包含负数或零的范围
+                    range_size = max_val - min_val
+                    if range_size > 1:
+                        score = 1.1
+            
+            complexity_scores.append(score)
+        
+        # 计算平均复杂度
+        avg_complexity = sum(complexity_scores) / len(complexity_scores) if complexity_scores else 1.0
+        
+        # 参数交互复杂度补偿（参数越多，交互可能性越高）
+        if n_params >= 5:
+            interaction_factor = 1.0 + (n_params - 4) * 0.02  # 每多一个参数增加2%
+            avg_complexity *= min(interaction_factor, 1.15)  # 最多增加15%
         
         # 限制复杂度因子范围
-        return min(2.0, max(0.8, complexity))
+        return min(1.5, max(0.7, avg_complexity))
     
     def get_recommendation_message(
         self,
@@ -493,18 +584,46 @@ class DynamicTrialsCalculator:
             n_params, search_space, user_trials
         )
         
+        # 计算复杂度因子（用于显示）
+        complexity_factor = 1.0
+        if search_space:
+            complexity_factor = self._analyze_space_complexity_v2(search_space, n_params)
+        
+        # 构建推荐说明
         message = f"""
-动态试验次数计算:
-  • 参数数量: {n_params}
-  • 推荐总试验次数: {total}
-    - 随机探索阶段 (正态分布采样): {exploration} 次 ({self.config.exploration_ratio*100:.0f}%)
-    - 智能采样阶段 (贝叶斯优化): {exploitation} 次 ({(1-self.config.exploration_ratio)*100:.0f}%)
+╔════════════════════════════════════════════════════════════╗
+║  动态试验次数计算                                           ║
+╠════════════════════════════════════════════════════════════╣
+║  • 待优化参数数量: {n_params}                                
+║  • 搜索空间复杂度: {complexity_factor:.2f}x                  
+║  • 推荐总试验次数: {total}                                   
+║    ├─ 探索阶段 (正态分布): {exploration} 次 ({self.config.exploration_ratio*100:.0f}%)
+║    └─ 利用阶段 (贝叶斯):   {exploitation} 次 ({(1-self.config.exploration_ratio)*100:.0f}%)
+╚════════════════════════════════════════════════════════════╝
 """
         
-        if user_trials and user_trials < total:
-            message += f"\n  ⚠️ 用户指定 {user_trials} 次可能不足，建议使用 {total} 次"
+        if user_trials:
+            if user_trials < total:
+                message += f"\n  ⚠️  用户指定 {user_trials} 次 < 推荐 {total} 次，已自动调整为推荐值"
+            else:
+                message += f"\n  ✓  用户指定 {user_trials} 次 ≥ 推荐 {total} 次，使用用户设定值"
         
         return message
+    
+    def get_quick_estimate(self, n_params: int) -> int:
+        """
+        快速估算试验次数（不需要搜索空间信息）
+        
+        Args:
+            n_params: 参数数量
+            
+        Returns:
+            推荐试验次数
+        """
+        if n_params <= 8:
+            return self.RECOMMENDED_TRIALS_PER_PARAM.get(n_params, 170)
+        else:
+            return 170 + (n_params - 8) * 20
 
 
 class EnhancedOptimizer:

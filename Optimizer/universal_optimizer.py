@@ -433,7 +433,7 @@ class UniversalOptimizer:
         current_space = search_space_config.strategy_params.copy()
         n_params = len(current_space)
         
-        # 2. 动态计算试验次数
+        # 2. 动态计算试验次数（传入搜索空间用于复杂度分析）
         actual_trials = n_trials
         exploration_trials = 0
         exploitation_trials = n_trials
@@ -441,8 +441,19 @@ class UniversalOptimizer:
         if enable_dynamic_trials and ENHANCED_SAMPLER_AVAILABLE:
             config = SamplerConfig()
             calculator = DynamicTrialsCalculator(config)
+            
+            # 构建搜索空间字典用于复杂度分析
+            space_dict = {p.name: p for p in current_space}
+            
             actual_trials, exploration_trials, exploitation_trials = \
-                calculator.calculate_trials(n_params, user_trials=n_trials)
+                calculator.calculate_trials(n_params, search_space=space_dict, user_trials=n_trials)
+            
+            # 输出详细推荐信息
+            if self.verbose:
+                recommendation_msg = calculator.get_recommendation_message(
+                    n_params, user_trials=n_trials, search_space=space_dict
+                )
+                print(recommendation_msg)
         
         if self.verbose:
             print(f"\n{'='*60}")
