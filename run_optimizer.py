@@ -37,7 +37,7 @@ from pathlib import Path
 from datetime import datetime
 
 # 添加 Optimizer 到路径
-optimizer_path = str(Path(__file__).parent / "Optimizer")
+optimizer_path = str(Path(__file__).parent / "optimizer")
 if optimizer_path not in sys.path:
     sys.path.insert(0, optimizer_path)
 

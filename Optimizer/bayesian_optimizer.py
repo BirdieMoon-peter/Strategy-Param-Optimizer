@@ -14,6 +14,7 @@ import os
 import sys
 import json
 import warnings
+import inspect
 from typing import Dict, List, Any, Optional, Type, Callable
 from dataclasses import dataclass, asdict
 from datetime import datetime
@@ -48,6 +49,26 @@ try:
     ENHANCED_SAMPLER_AVAILABLE = True
 except ImportError:
     ENHANCED_SAMPLER_AVAILABLE = False
+
+
+def _strategy_accepts_verbose(strategy_class: Type[bt.Strategy]) -> bool:
+    """
+    检查策略类的 __init__ 方法是否接受 verbose 参数
+    
+    Args:
+        strategy_class: 策略类
+        
+    Returns:
+        True 如果策略接受 verbose 参数，否则 False
+    """
+    try:
+        sig = inspect.signature(strategy_class.__init__)
+        return 'verbose' in sig.parameters or any(
+            p.kind == inspect.Parameter.VAR_KEYWORD 
+            for p in sig.parameters.values()
+        )
+    except Exception:
+        return False
 
 
 @dataclass
@@ -189,7 +210,9 @@ class BayesianOptimizer:
         data: pd.DataFrame,
         search_space: Dict[str, SearchSpaceConfig],
         objective: str,
-        history_list: List[Dict]
+        history_list: List[Dict],
+        verbose: bool = True,
+        phase: str = "exploitation"
     ) -> Callable:
         """
         创建Optuna目标函数
@@ -200,30 +223,46 @@ class BayesianOptimizer:
             search_space: 搜索空间
             objective: 优化目标
             history_list: 历史记录列表（用于存储）
+            verbose: 是否打印详细信息
+            phase: 当前阶段（exploration/exploitation）
             
         Returns:
             目标函数
         """
+        # 使用闭包变量跟踪当前最优值
+        best_value_tracker = {'value': float('-inf'), 'params': None}
+        
         def objective_fn(trial: optuna.Trial) -> float:
-            # 建议参数
-            params = self._suggest_params(trial, search_space)
+            try:
+                # 建议参数
+                params = self._suggest_params(trial, search_space)
+                
+                # 在优化模式下自动禁用策略日志（仅当策略支持时）
+                run_params = params.copy()
+                if _strategy_accepts_verbose(strategy_class):
+                    run_params['verbose'] = False
+                
+                # 运行回测
+                result = self.backtest_engine.run_backtest(
+                    strategy_class,
+                    data,
+                    run_params
+                )
+                
+                if result is None:
+                    return float('-inf')
+                
+                # 获取目标值
+                value = self.backtest_engine.evaluate_objective(result, objective)
             
-            # 在优化模式下自动禁用策略日志
-            run_params = params.copy()
-            run_params['verbose'] = False
-            
-            # 运行回测
-            result = self.backtest_engine.run_backtest(
-                strategy_class,
-                data,
-                run_params
-            )
-            
-            if result is None:
+            except Exception as e:
+                # 捕获异常，打印错误信息，但不中断优化
+                if verbose:
+                    print(f"\n⚠️  [Trial {trial.number}] 回测异常: {str(e)}")
+                    print(f"   参数: {params if 'params' in locals() else 'N/A'}")
+                    import traceback
+                    print(f"   详细信息: {traceback.format_exc()[:200]}...")
                 return float('-inf')
-            
-            # 获取目标值
-            value = self.backtest_engine.evaluate_objective(result, objective)
             
             # 记录历史
             history_list.append({
@@ -234,6 +273,32 @@ class BayesianOptimizer:
                 "annual_return": result.annual_return,
                 "max_drawdown": result.max_drawdown
             })
+            
+            # 检查是否找到更优参数
+            if value > best_value_tracker['value']:
+                best_value_tracker['value'] = value
+                best_value_tracker['params'] = params.copy()
+                
+                # 实时输出更优参数
+                if verbose:
+                    phase_cn = "利用阶段" if phase == "exploitation" else "探索阶段"
+                    print(f"\n╔{'═'*78}╗")
+                    print(f"║ {'🎯 发现更优参数！'.center(70)} ║")
+                    print(f"╠{'═'*78}╣")
+                    print(f"║ Trial {trial.number} ({phase_cn}) {'':63} ║")
+                    print(f"║ 目标值: {value:<66.4f} ║")
+                    print(f"║ 夏普比率: {result.sharpe_ratio:<62.4f} ║")
+                    print(f"║ 年化收益: {result.annual_return:<61.2f}% ║")
+                    print(f"║ 最大回撤: {result.max_drawdown:<61.2f}% ║")
+                    print(f"╠{'═'*78}╣")
+                    print(f"║ {'参数集:'.ljust(76)} ║")
+                    for k, v in params.items():
+                        if isinstance(v, float):
+                            param_str = f"  • {k}: {v:.4f}"
+                        else:
+                            param_str = f"  • {k}: {v}"
+                        print(f"║ {param_str:<76} ║")
+                    print(f"╚{'═'*78}╝")
             
             return value
         
@@ -299,13 +364,15 @@ class BayesianOptimizer:
             )
         
         if verbose:
-            print(f"\n{'='*60}")
-            print(f"开始优化: {strategy_name}")
-            print(f"目标: {objective}")
-            print(f"总试验次数: {n_trials}")
+            print(f"\n╔{'═'*58}╗")
+            print(f"║ {'开始优化'.center(54)} ║")
+            print(f"╠{'═'*58}╣")
+            print(f"║ 策略名称: {strategy_name:<44} ║")
+            print(f"║ 优化目标: {objective:<44} ║")
+            print(f"║ 试验次数: {n_trials:<44} ║")
             if use_enhanced_sampler and ENHANCED_SAMPLER_AVAILABLE:
-                print(f"优化策略: 两阶段优化 (正态分布探索 + 贝叶斯利用)")
-            print(f"{'='*60}")
+                print(f"║ 优化策略: {'两阶段优化 (正态分布探索 + 贝叶斯利用)':<44} ║")
+            print(f"╚{'═'*58}╝")
         
         # 初始化历史记录
         history_list = []
@@ -317,9 +384,11 @@ class BayesianOptimizer:
         
         if use_enhanced_sampler and ENHANCED_SAMPLER_AVAILABLE and exploration_trials > 0:
             if verbose:
-                print(f"\n{'='*60}")
-                print(f"阶段1: 正态分布随机探索 ({exploration_trials} 次)")
-                print(f"{'='*60}")
+                print(f"\n╔{'═'*58}╗")
+                print(f"║ {'阶段1: 正态分布随机探索'.center(54)} ║")
+                print(f"╠{'═'*58}╣")
+                print(f"║ 试验次数: {exploration_trials:<44} ║")
+                print(f"╚{'═'*58}╝")
             
             sampler = NormalDistributionSampler(SamplerConfig(), seed=self.config.seed)
             
@@ -348,9 +417,10 @@ class BayesianOptimizer:
                             else:
                                 print(f"   • {k}: {v}")
                     
-                    # 在优化模式下自动禁用策略日志
+                    # 在优化模式下自动禁用策略日志（仅当策略支持时）
                     run_params = params.copy()
-                    run_params['verbose'] = False
+                    if _strategy_accepts_verbose(strategy_class):
+                        run_params['verbose'] = False
                     
                     result = self.backtest_engine.run_backtest(
                         strategy_class, data, run_params
@@ -364,12 +434,15 @@ class BayesianOptimizer:
                     if is_default_trial:
                         default_params_value = value
                         if verbose:
-                            print(f"[Trial 0] 默认参数 {objective}: {value:.4f}")
+                            print(f"\n╔{'═'*78}╗")
+                            print(f"║ {'Trial 0: 策略默认参数回测'.center(74)} ║")
+                            print(f"╠{'═'*78}╣")
+                            print(f"║ 目标值 ({objective}): {value:<57.4f} ║")
                             if result:
-                                print(f"[Trial 0] 夏普比率: {result.sharpe_ratio:.4f}, "
-                                      f"年化收益: {result.annual_return:.2f}%, "
-                                      f"最大回撤: {result.max_drawdown:.2f}%")
-                            print()
+                                print(f"║ 夏普比率: {result.sharpe_ratio:<62.4f} ║")
+                                print(f"║ 年化收益: {result.annual_return:<61.2f}% ║")
+                                print(f"║ 最大回撤: {result.max_drawdown:<61.2f}% ║")
+                            print(f"╚{'═'*78}╝")
                     
                     history_list.append({
                         "trial": i,
@@ -385,27 +458,70 @@ class BayesianOptimizer:
                     if value > best_exploration_value:
                         best_exploration_value = value
                         best_exploration_params = params.copy()
+                        
+                        # 发现更优参数时立即输出
+                        if verbose:
+                            print(f"\n╔{'═'*78}╗")
+                            print(f"║ {'🎯 发现更优参数！'.center(70)} ║")
+                            print(f"╠{'═'*78}╣")
+                            print(f"║ Trial {i} (探索阶段) {'':63} ║")
+                            print(f"║ 目标值: {value:<66.4f} ║")
+                            if result:
+                                print(f"║ 夏普比率: {result.sharpe_ratio:<62.4f} ║")
+                                print(f"║ 年化收益: {result.annual_return:<61.2f}% ║")
+                                print(f"║ 最大回撤: {result.max_drawdown:<61.2f}% ║")
+                            print(f"╠{'═'*78}╣")
+                            print(f"║ {'参数集:'.ljust(76)} ║")
+                            for k, v in params.items():
+                                if isinstance(v, float):
+                                    param_str = f"  • {k}: {v:.4f}"
+                                else:
+                                    param_str = f"  • {k}: {v}"
+                                print(f"║ {param_str:<76} ║")
+                            print(f"╚{'═'*78}╝")
                     
-                    if verbose and (i + 1) % 5 == 0:
-                        print(f"[探索阶段] 进度: {i+1}/{exploration_trials} "
+                    if verbose and (i + 1) % 10 == 0:
+                        progress_pct = (i + 1) / exploration_trials * 100
+                        print(f"[探索阶段] 进度: {i+1}/{exploration_trials} ({progress_pct:.1f}%) | "
                               f"当前最优: {best_exploration_value:.4f}")
                         
                 except Exception as e:
+                    # 探索阶段异常处理：打印详细错误但继续执行
                     if verbose:
-                        print(f"[探索阶段] 试验 {i} 失败: {e}")
-            
+                        print(f"\n⚠️  [探索阶段 Trial {i}] 回测异常: {str(e)}")
+                        print(f"   参数: {params}")
+                        import traceback
+                        traceback.print_exc()
+                    # 记录失败的试验
+                    history_list.append({
+                        "trial": i,
+                        "phase": "exploration",
+                        "is_default": is_default_trial if 'is_default_trial' in locals() else False,
+                        "params": params.copy(),
+                        "value": float('-inf'),
+                        "sharpe": 0,
+                        "annual_return": 0,
+                        "max_drawdown": 0,
+                        "error": str(e)
+                    })
+                    continue
             if verbose:
-                print(f"\n[探索阶段完成] 最佳值: {best_exploration_value:.4f}")
-                print(f"[探索阶段完成] 最佳参数: {best_exploration_params}")
+                print(f"\n╔{'═'*78}╗")
+                print(f"║ {'探索阶段完成'.center(74)} ║")
+                print(f"╠{'═'*78}╣")
+                print(f"║ 最佳目标值: {best_exploration_value:<61.4f} ║")
                 if default_params_value is not None:
                     improvement = ((best_exploration_value - default_params_value) / abs(default_params_value) * 100) if default_params_value != 0 else 0
-                    print(f"[探索阶段完成] 相比默认参数提升: {improvement:+.2f}%")
+                    print(f"║ 相比默认参数: {improvement:>+60.2f}% ║")
+                print(f"╚{'═'*78}╝")
         
         # ============ 阶段2: 贝叶斯智能采样（利用阶段）============
         if verbose:
-            print(f"\n{'='*60}")
-            print(f"阶段2: 贝叶斯智能采样 ({exploitation_trials} 次)")
-            print(f"{'='*60}")
+            print(f"\n╔{'═'*58}╗")
+            print(f"║ {'阶段2: 贝叶斯智能采样'.center(54)} ║")
+            print(f"╠{'═'*58}╣")
+            print(f"║ 试验次数: {exploitation_trials:<44} ║")
+            print(f"╚{'═'*58}╝")
         
         # 创建Study
         direction = "maximize"  # 回撤已在evaluate_objective中取负
@@ -434,16 +550,25 @@ class BayesianOptimizer:
         # 创建目标函数
         exploitation_history = []
         objective_fn = self._create_objective_function(
-            strategy_class, data, search_space, objective, exploitation_history
+            strategy_class, data, search_space, objective, exploitation_history,
+            verbose=self.verbose, phase="exploitation"
         )
         
-        # 运行贝叶斯优化
-        study.optimize(
-            objective_fn,
-            n_trials=exploitation_trials,
-            show_progress_bar=verbose,
-            n_jobs=self.config.n_jobs
-        )
+        # 运行贝叶斯优化（添加异常处理）
+        try:
+            study.optimize(
+                objective_fn,
+                n_trials=exploitation_trials,
+                show_progress_bar=verbose,
+                n_jobs=self.config.n_jobs
+            )
+        except Exception as e:
+            # 捕获优化过程中的严重异常
+            if verbose:
+                print(f"\n❌ [利用阶段] 优化过程异常: {str(e)}")
+                import traceback
+                traceback.print_exc()
+                print(f"\n⚠️  优化将使用已完成的 {len(exploitation_history)} 次试验结果继续...")
         
         # 合并历史记录
         for i, record in enumerate(exploitation_history):
@@ -454,8 +579,16 @@ class BayesianOptimizer:
         optimization_time = (datetime.now() - start_time).total_seconds()
         
         # 获取最佳结果（比较探索和利用阶段）
-        best_params = study.best_params
-        best_value = study.best_value
+        try:
+            best_params = study.best_params
+            best_value = study.best_value
+        except Exception as e:
+            # 如果无法从study获取最佳结果，使用探索阶段的最佳结果
+            if verbose:
+                print(f"\n⚠️  无法从利用阶段获取最佳结果: {str(e)}")
+                print(f"   使用探索阶段的最佳结果...")
+            best_params = best_exploration_params if best_exploration_params else {}
+            best_value = best_exploration_value
         
         if best_exploration_value > best_value:
             best_params = best_exploration_params
@@ -464,24 +597,44 @@ class BayesianOptimizer:
                 print(f"\n[结果] 探索阶段找到的参数更优!")
         
         # 重新运行最佳参数获取完整回测结果
-        final_params = best_params.copy()
-        final_params['verbose'] = False
-        best_result = self.backtest_engine.run_backtest(
-            strategy_class, data, final_params
-        )
+        try:
+            final_params = best_params.copy()
+            if _strategy_accepts_verbose(strategy_class):
+                final_params['verbose'] = False
+            best_result = self.backtest_engine.run_backtest(
+                strategy_class, data, final_params
+            )
+        except Exception as e:
+            if verbose:
+                print(f"\n⚠️  重新运行最佳参数时异常: {str(e)}")
+                print(f"   将使用历史记录中的结果...")
+            # 尝试从历史记录中获取最佳结果
+            best_result = None
+            for record in history_list:
+                if record.get('params') == best_params and record.get('value') == best_value:
+                    best_result = record.get('result')
+                    break
         
         if verbose:
-            print(f"\n{'='*60}")
-            print(f"优化完成!")
-            print(f"{'='*60}")
-            print(f"最佳参数: {best_params}")
-            print(f"最佳{objective}: {best_value:.4f}")
+            print(f"\n╔{'═'*78}╗")
+            print(f"║ {'✅ 优化完成！'.center(70)} ║")
+            print(f"╠{'═'*78}╣")
+            print(f"║ 最佳目标值 ({objective}): {best_value:<53.4f} ║")
             if best_result:
-                summary = self.backtest_engine.get_result_summary(best_result)
-                print("回测结果:")
-                for k, v in summary.items():
-                    print(f"  {k}: {v}")
-            print(f"总耗时: {optimization_time:.2f} 秒")
+                print(f"║ 夏普比率: {best_result.sharpe_ratio:<62.4f} ║")
+                print(f"║ 年化收益: {best_result.annual_return:<61.2f}% ║")
+                print(f"║ 最大回撤: {best_result.max_drawdown:<61.2f}% ║")
+                print(f"║ 总交易次数: {best_result.trades_count:<60} ║")
+            print(f"║ 总耗时: {optimization_time:<65.2f}s ║")
+            print(f"╠{'═'*78}╣")
+            print(f"║ {'最佳参数集:'.ljust(76)} ║")
+            for k, v in best_params.items():
+                if isinstance(v, float):
+                    param_str = f"  • {k}: {v:.4f}"
+                else:
+                    param_str = f"  • {k}: {v}"
+                print(f"║ {param_str:<76} ║")
+            print(f"╚{'═'*78}╝")
         
         # 保存历史
         key = f"{strategy_name}_{objective}"

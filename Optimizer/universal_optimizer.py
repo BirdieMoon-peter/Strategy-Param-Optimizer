@@ -456,23 +456,23 @@ class UniversalOptimizer:
                 print(recommendation_msg)
         
         if self.verbose:
-            print(f"\n{'='*60}")
-            print(f"开始优化流程")
-            print(f"{'='*60}")
-            print(f"参数数量: {n_params}")
+            print(f"\n╔{'═'*78}╗")
+            print(f"║ {'开始优化流程'.center(74)} ║")
+            print(f"╠{'═'*78}╣")
+            print(f"║ 参数数量: {n_params:<64} ║")
             if enable_dynamic_trials and ENHANCED_SAMPLER_AVAILABLE:
-                print(f"动态试验次数: 启用")
-                print(f"  - 用户指定: {n_trials} 次")
-                print(f"  - 实际试验: {actual_trials} 次")
-                print(f"    • 探索阶段 (正态分布): {exploration_trials} 次")
-                print(f"    • 利用阶段 (贝叶斯): {exploitation_trials} 次")
+                print(f"║ 动态试验次数: {'启用':<59} ║")
+                print(f"║   • 用户指定: {n_trials:<58} 次 ║")
+                print(f"║   • 实际试验: {actual_trials:<58} 次 ║")
+                print(f"║   • 探索阶段: {exploration_trials:<58} 次 ║")
+                print(f"║   • 利用阶段: {exploitation_trials:<58} 次 ║")
             else:
-                print(f"试验次数: {actual_trials} 次")
+                print(f"║ 试验次数: {actual_trials:<63} 次 ║")
             if use_enhanced_sampler and ENHANCED_SAMPLER_AVAILABLE:
-                print(f"采样策略: 正态分布 + 贝叶斯优化")
+                print(f"║ 采样策略: {'正态分布 + 贝叶斯优化':<59} ║")
             if auto_expand_boundary:
-                print(f"边界二次搜索: 启用 (最多{max_expansion_rounds}轮)")
-            print(f"{'='*60}\n")
+                print(f"║ 边界二次搜索: 启用 (最多{max_expansion_rounds}轮) {'':40} ║")
+            print(f"╚{'═'*78}╝")
         
         # 提取策略的默认参数，用于初始采样
         default_params = {}
@@ -499,10 +499,12 @@ class UniversalOptimizer:
             round_trials = actual_trials if expansion_round == 0 else int(actual_trials * 0.5)  # 二次搜索用一半试验
             
             if self.verbose and expansion_round > 0:
-                print(f"\n{'='*60}")
-                print(f"🔄 边界二次搜索 - {round_label}")
-                print(f"试验次数: {round_trials}")
-                print(f"{'='*60}\n")
+                print(f"\n╔{'═'*78}╗")
+                print(f"║ {'🔄 边界二次搜索'.center(70)} ║")
+                print(f"╠{'═'*78}╣")
+                print(f"║ 轮次: {round_label:<69} ║")
+                print(f"║ 试验次数: {round_trials:<63} 次 ║")
+                print(f"╚{'═'*78}╝")
             
             # 转换搜索空间
             search_space = self._convert_search_space(
@@ -520,19 +522,35 @@ class UniversalOptimizer:
             # 确定初始采样点（首轮用默认参数，后续轮用上一轮最优）
             init_params = default_params if expansion_round == 0 else best_params
             
-            # 执行优化（使用增强采样器）
-            opt_result = optimizer.optimize_single_objective(
-                strategy_class=self.strategy_class,
-                strategy_name=self.strategy_info['class_name'],
-                data=self.data,
-                objective=self.objective,
-                search_space=search_space,
-                n_trials=round_trials,
-                verbose=self.verbose,
-                default_params=init_params,
-                use_enhanced_sampler=use_enhanced_sampler and ENHANCED_SAMPLER_AVAILABLE,
-                enable_dynamic_trials=enable_dynamic_trials
-            )
+            # 执行优化（使用增强采样器，添加异常处理）
+            try:
+                opt_result = optimizer.optimize_single_objective(
+                    strategy_class=self.strategy_class,
+                    strategy_name=self.strategy_info['class_name'],
+                    data=self.data,
+                    objective=self.objective,
+                    search_space=search_space,
+                    n_trials=round_trials,
+                    verbose=self.verbose,
+                    default_params=init_params,
+                    use_enhanced_sampler=use_enhanced_sampler and ENHANCED_SAMPLER_AVAILABLE,
+                    enable_dynamic_trials=enable_dynamic_trials
+                )
+            except Exception as e:
+                # 优化轮次失败，打印错误但尝试继续
+                if self.verbose:
+                    print(f"\n❌ [{round_label}] 优化失败: {str(e)}")
+                    import traceback
+                    traceback.print_exc()
+                
+                # 如果是首轮失败且没有任何结果，抛出异常
+                if expansion_round == 0 and best_result is None:
+                    raise
+                
+                # 否则使用已有的最佳结果继续
+                if self.verbose:
+                    print(f"\n⚠️  将使用已有的最佳结果继续...")
+                break
             
             # 更新最优结果
             current_value = opt_result.best_value
@@ -554,16 +572,24 @@ class UniversalOptimizer:
             
             if not boundary_params:
                 if self.verbose:
-                    print(f"\n✅ 无参数处于边界，优化完成")
+                    print(f"\n╔{'═'*78}╗")
+                    print(f"║ {'✅ 无参数处于边界，优化完成'.center(70)} ║")
+                    print(f"╚{'═'*78}╝")
                 break
             
             # 有参数在边界，执行扩展
             if self.verbose:
-                print(f"\n⚠️  检测到 {len(boundary_params)} 个参数处于边界:")
+                print(f"\n╔{'═'*78}╗")
+                print(f"║ {'⚠️  边界参数检测'.center(70)} ║")
+                print(f"╠{'═'*78}╣")
+                print(f"║ 检测到 {len(boundary_params)} 个参数处于边界: {'':55} ║")
                 for bp in boundary_params:
                     side_cn = "下界" if bp['side'] == 'lower' else "上界"
-                    print(f"   • {bp['name']}: {bp['value']:.4f} (接近{side_cn} {bp['boundary']:.4f})")
-                print(f"\n🔄 自动扩展边界参数，开始二次搜索...")
+                    param_info = f"  • {bp['name']}: {bp['value']:.4f} (接近{side_cn} {bp['boundary']:.4f})"
+                    print(f"║ {param_info:<76} ║")
+                print(f"╠{'═'*78}╣")
+                print(f"║ {'🔄 自动扩展边界参数，准备二次搜索...'.ljust(76)} ║")
+                print(f"╚{'═'*78}╝")
             
             # 扩展边界
             current_space, expanded_names = self.param_space_optimizer.expand_boundary_params(
@@ -574,43 +600,66 @@ class UniversalOptimizer:
             )
             
             if self.verbose:
-                print(f"\n📐 扩展后的参数空间:")
+                print(f"\n╔{'═'*78}╗")
+                print(f"║ {'📐 扩展后的参数空间'.center(70)} ║")
+                print(f"╠{'═'*78}╣")
                 for param in current_space:
                     if param.name in expanded_names:
-                        print(f"   • {param.name}: [{param.min_value}, {param.max_value}] (已扩展)")
+                        param_info = f"  • {param.name}: [{param.min_value}, {param.max_value}] (已扩展)"
+                        print(f"║ {param_info:<76} ║")
+                print(f"╚{'═'*78}╝")
             
             expansion_round += 1
         
-        # 5. 分析参数空间使用情况
+        # 5. 分析参数空间使用情况（添加异常保护）
         if self.verbose:
-            print(f"\n{'='*60}")
-            print("参数空间分析")
-            print(f"{'='*60}")
+            print(f"\n╔{'═'*78}╗")
+            print(f"║ {'参数空间分析'.center(74)} ║")
+            print(f"╚{'═'*78}╝")
         
-        param_analysis = self.param_space_optimizer.analyze_optimization_results(
-            best_params,
-            current_space
-        )
+        try:
+            param_analysis = self.param_space_optimizer.analyze_optimization_results(
+                best_params,
+                current_space
+            )
+        except Exception as e:
+            if self.verbose:
+                print(f"\n⚠️  参数空间分析失败: {str(e)}")
+            param_analysis = {"suggestions": [], "boundary_params": [], "usage": {}}
         
-        if self.verbose and param_analysis["suggestions"]:
-            print("\n💡 参数空间优化建议:")
+        if self.verbose and param_analysis.get("suggestions"):
+            print(f"\n╔{'═'*78}╗")
+            print(f"║ {'💡 参数空间优化建议'.center(70)} ║")
+            print(f"╠{'═'*78}╣")
             for suggestion in param_analysis["suggestions"]:
-                print(f"  • {suggestion}")
-            print(f"{'='*60}\n")
+                print(f"║ • {suggestion:<74} ║")
+            print(f"╚{'═'*78}╝")
         
-        # 6. 生成详细结果
-        result = self._generate_result(best_result)
-        result["param_space_analysis"] = param_analysis
-        result["optimization_info"]["expansion_rounds"] = expansion_round
-        result["optimization_info"]["auto_expand_boundary"] = auto_expand_boundary
-        result["optimization_info"]["total_trials"] = actual_trials
-        result["optimization_info"]["exploration_trials"] = exploration_trials
-        result["optimization_info"]["exploitation_trials"] = exploitation_trials
-        result["optimization_info"]["use_enhanced_sampler"] = use_enhanced_sampler and ENHANCED_SAMPLER_AVAILABLE
-        result["optimization_info"]["dynamic_trials_enabled"] = enable_dynamic_trials
+        # 6. 生成详细结果（添加异常保护）
+        try:
+            result = self._generate_result(best_result)
+            result["param_space_analysis"] = param_analysis
+            result["optimization_info"]["expansion_rounds"] = expansion_round
+            result["optimization_info"]["auto_expand_boundary"] = auto_expand_boundary
+            result["optimization_info"]["total_trials"] = actual_trials
+            result["optimization_info"]["exploration_trials"] = exploration_trials
+            result["optimization_info"]["exploitation_trials"] = exploitation_trials
+            result["optimization_info"]["use_enhanced_sampler"] = use_enhanced_sampler and ENHANCED_SAMPLER_AVAILABLE
+            result["optimization_info"]["dynamic_trials_enabled"] = enable_dynamic_trials
+        except Exception as e:
+            if self.verbose:
+                print(f"\n❌ 生成结果失败: {str(e)}")
+                import traceback
+                traceback.print_exc()
+            raise
         
-        # 7. 保存结果
-        output_path = self._save_result(result)
+        # 7. 保存结果（添加异常保护）
+        try:
+            output_path = self._save_result(result)
+        except Exception as e:
+            if self.verbose:
+                print(f"\n⚠️  保存结果失败: {str(e)}")
+            output_path = None
         
         if self.verbose:
             print(f"\n{'='*60}")
