@@ -34,6 +34,7 @@ except ImportError:
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from config import BacktestConfig, DEFAULT_BACKTEST_CONFIG, get_annualization_factor
+from futures_config import BrokerConfig, create_commission_info
 
 
 def _is_intraday_frequency(data_frequency: str) -> bool:
@@ -526,7 +527,8 @@ class BacktestEngine:
         custom_data_class: Type = None,
         custom_commission_class: Type = None,
         strategy_module: Any = None,
-        use_trade_log_metrics: bool = False
+        use_trade_log_metrics: bool = False,
+        broker_config: BrokerConfig = None
     ):
         """
         初始化回测引擎
@@ -560,6 +562,15 @@ class BacktestEngine:
         self.custom_commission_class = custom_commission_class
         self.strategy_module = strategy_module
         self.use_trade_log_metrics = use_trade_log_metrics
+
+        # 期货经纪商配置
+        self.broker_config = broker_config
+        self.fixed_strategy_params = {}
+        if broker_config and broker_config.is_futures:
+            self.fixed_strategy_params = {
+                'mult': broker_config.mult,
+                'margin': broker_config.margin,
+            }
         
         # 设置数据频率
         if data_frequency:
@@ -735,8 +746,11 @@ class BacktestEngine:
             cerebro = bt.Cerebro(stdstats=True)
             cerebro.broker.setcash(self.config.initial_cash)
             
-            # 设置手续费：优先使用自定义手续费类
-            if self.custom_commission_class is not None:
+            # 设置手续费：优先使用期货配置 > 自定义手续费类 > 默认百分比
+            if self.broker_config is not None and self.broker_config.is_futures:
+                comminfo = create_commission_info(self.broker_config)
+                cerebro.broker.addcommissioninfo(comminfo)
+            elif self.custom_commission_class is not None:
                 cerebro.broker.addcommissioninfo(self.custom_commission_class())
             else:
                 cerebro.broker.setcommission(commission=self.config.commission)
@@ -801,8 +815,9 @@ class BacktestEngine:
                 bt_data = DataClass(dataname=prepared, name=asset_name)
                 cerebro.adddata(bt_data)
             
-            # 添加策略
-            cerebro.addstrategy(strategy_class, **params)
+            # 添加策略（合并期货固定参数）
+            merged_params = dict(self.fixed_strategy_params, **params) if self.fixed_strategy_params else params
+            cerebro.addstrategy(strategy_class, **merged_params)
             
             # 添加分析器
             cerebro.addanalyzer(bt.analyzers.Returns, _name='returns')

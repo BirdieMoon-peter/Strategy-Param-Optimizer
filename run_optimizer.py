@@ -44,6 +44,7 @@ if optimizer_path not in sys.path:
 # 导入优化器模块
 import universal_optimizer
 import universal_llm_client
+import futures_config as fc
 UniversalOptimizer = universal_optimizer.UniversalOptimizer
 UniversalLLMConfig = universal_llm_client.UniversalLLMConfig
 
@@ -119,6 +120,12 @@ def prepare_data(data_path: str) -> str:
     """
     df = pd.read_csv(data_path)
     
+    # 移除未命名的索引列（如果存在）
+    unnamed_cols = [col for col in df.columns if 'Unnamed' in str(col)]
+    if unnamed_cols:
+        df = df.drop(columns=unnamed_cols)
+        print(f"[数据] 已移除未命名列: {unnamed_cols}")
+    
     # 检查并重命名日期列
     if 'datetime' not in df.columns:
         if 'date' in df.columns:
@@ -127,12 +134,29 @@ def prepare_data(data_path: str) -> str:
         elif 'time_key' in df.columns:
             df.rename(columns={'time_key': 'datetime'}, inplace=True)
             print(f"[数据] 已将 'time_key' 列重命名为 'datetime'")
+        elif 'time' in df.columns:
+            df.rename(columns={'time': 'datetime'}, inplace=True)
+            print(f"[数据] 已将 'time' 列重命名为 'datetime'")
     
     if 'datetime' not in df.columns:
-        raise ValueError("数据文件必须包含 'datetime' 或 'date' 列")
+        raise ValueError("数据文件必须包含 'datetime'、'date'、'time' 或 'time_key' 列")
     
-    # 转换日期格式
-    df['datetime'] = pd.to_datetime(df['datetime'])
+    # 转换日期格式（支持时间戳和日期字符串）
+    # 先检查是否为数值型（时间戳）
+    if pd.api.types.is_numeric_dtype(df['datetime']):
+        # 判断是秒还是毫秒时间戳（毫秒时间戳通常 > 1e12）
+        if df['datetime'].iloc[0] > 1e12:
+            # 毫秒级时间戳
+            df['datetime'] = pd.to_datetime(df['datetime'], unit='ms')
+            print(f"[数据] 已将毫秒级时间戳转换为日期格式")
+        else:
+            # 秒级时间戳
+            df['datetime'] = pd.to_datetime(df['datetime'], unit='s')
+            print(f"[数据] 已将秒级时间戳转换为日期格式")
+    else:
+        # 字符串格式，直接解析
+        df['datetime'] = pd.to_datetime(df['datetime'])
+        print(f"[数据] 已将日期字符串转换为日期格式")
     
     # 保存处理后的数据
     data_dir = Path(data_path).parent
@@ -276,6 +300,12 @@ def main():
   # 指定优化目标
   python run_optimizer.py --data project_trend/data/AG.csv --strategy project_trend/src/Aberration.py --objective annual_return
 
+  # 期货优化（内置品种配置）
+  python run_optimizer.py --data data/AG.csv --strategy strategy.py --asset-type futures --contract-code AG
+
+  # 期货优化（自定义JSON配置）
+  python run_optimizer.py --data data/AG.csv --strategy strategy.py --broker-config my_broker.json
+
 优化目标选项:
   sharpe_ratio   - 夏普比率（默认，推荐）
   annual_return  - 年化收益率
@@ -340,6 +370,24 @@ def main():
         default=None,
         choices=["daily", "1m", "5m", "15m", "30m", "hourly", "auto"],
         help="数据频率（默认: auto自动检测）。daily=日线, 1m=1分钟, 5m=5分钟, 15m=15分钟, 30m=30分钟, hourly=小时线"
+    )
+
+    # 期货/资产类型参数
+    parser.add_argument(
+        "--asset-type",
+        default="stock",
+        choices=["stock", "futures"],
+        help="资产类型（默认: stock）。设为 futures 时需配合 --contract-code 或 --broker-config"
+    )
+    parser.add_argument(
+        "--contract-code",
+        default=None,
+        help="内置期货合约代码（如 SC, AG, AU, CU, RB, IF）。需配合 --asset-type futures"
+    )
+    parser.add_argument(
+        "--broker-config",
+        default=None,
+        help="自定义经纪商配置文件路径（JSON格式），用于任意期货品种。优先级高于 --contract-code"
     )
     
     # v2.0 新增：增强采样器参数
@@ -412,7 +460,40 @@ def main():
     )
     
     args = parser.parse_args()
-    
+
+    # 验证期货参数组合
+    if args.asset_type == 'futures' and not args.contract_code and not args.broker_config:
+        print("❌ 错误: --asset-type futures 需要配合 --contract-code 或 --broker-config 使用")
+        print(f"   支持的内置合约: {', '.join(sorted(fc.FUTURES_CONFIG.keys()))}")
+        return 1
+
+    if args.contract_code and args.broker_config:
+        print("⚠️  注意: 同时指定了 --contract-code 和 --broker-config，将优先使用 --broker-config")
+
+    # 构建经纪商配置
+    try:
+        broker_config = fc.build_broker_config(
+            asset_type=args.asset_type,
+            contract_code=args.contract_code,
+            broker_config_path=args.broker_config,
+            initial_cash=100000.0
+        )
+        if broker_config.is_futures and not args.quiet:
+            print(f"\n{'='*60}")
+            print(f"经纪商配置")
+            print(f"{'='*60}")
+            print(f"资产类型: 期货")
+            print(f"合约: {broker_config.contract_name or broker_config.contract_code} ({broker_config.contract_code})")
+            print(f"合约乘数: {broker_config.mult}")
+            print(f"保证金比例: {broker_config.margin*100:.1f}%")
+            comm_desc = f"{broker_config.commission}元/手" if broker_config.comm_type == 'FIXED' else f"费率{broker_config.commission}"
+            print(f"手续费: {comm_desc} ({'固定金额' if broker_config.comm_type == 'FIXED' else '百分比'})")
+            print(f"初始资金: {broker_config.initial_cash:,.0f}")
+            print(f"{'='*60}")
+    except (FileNotFoundError, ValueError) as e:
+        print(f"❌ 错误: 经纪商配置失败: {e}")
+        return 1
+
     # 展开通配符并收集所有数据文件
     data_files = []
     for pattern in args.data:
@@ -578,7 +659,8 @@ def main():
                     target_params=target_params,
                     custom_space=custom_space,
                     data_names=data_names,
-                    data_frequency=args.data_freq
+                    data_frequency=args.data_freq,
+                    broker_config=broker_config
                 )
                 
                 # 执行优化
@@ -657,7 +739,8 @@ def main():
                         verbose=not args.quiet,
                         target_params=target_params,
                         custom_space=custom_space,
-                        data_frequency=args.data_freq
+                        data_frequency=args.data_freq,
+                        broker_config=broker_config
                     )
                     
                     # 执行优化（v2.0 新增参数）

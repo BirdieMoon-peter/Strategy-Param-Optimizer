@@ -27,6 +27,7 @@ from bayesian_optimizer import BayesianOptimizer
 from config import StrategyParam, BayesianOptConfig
 from strategy_analyzer import SearchSpaceConfig as ParamSearchSpaceConfig
 from param_space_optimizer import ParamSpaceOptimizer
+from futures_config import BrokerConfig, create_commission_info
 
 # 导入增强采样器
 try:
@@ -67,7 +68,8 @@ class UniversalOptimizer:
         target_params: Optional[List[str]] = None,
         custom_space: Optional[Dict[str, Dict]] = None,
         data_names: Optional[List[str]] = None,
-        data_frequency: Optional[str] = None
+        data_frequency: Optional[str] = None,
+        broker_config: Optional[BrokerConfig] = None
     ):
         """
         初始化优化器
@@ -94,6 +96,7 @@ class UniversalOptimizer:
         self.custom_space = custom_space  # 自定义参数空间
         self.data_names = data_names  # 多数据源名称（可选）
         self.data_frequency = data_frequency  # 数据频率
+        self.broker_config = broker_config  # 经纪商配置（期货/股票）
         
         # 创建输出目录
         self.output_dir = Path(output_dir)
@@ -130,16 +133,19 @@ class UniversalOptimizer:
         # 初始化回测引擎（传递数据频率，如果是 'auto' 或 None 则自动检测）
         # 同时传入自定义数据类、手续费类等
         effective_freq = None if (data_frequency is None or data_frequency == 'auto') else data_frequency
+        initial_cash = broker_config.initial_cash if broker_config else 100000.0
+        commission = broker_config.commission if (broker_config and not broker_config.is_futures) else 0.001
         self.backtest_engine = BacktestEngine(
             data=self.data,
             strategy_class=self.strategy_class,
-            initial_cash=100000.0,
-            commission=0.001,
+            initial_cash=initial_cash,
+            commission=commission,
             data_frequency=effective_freq,
             custom_data_class=getattr(self, 'custom_data_class', None),
             custom_commission_class=getattr(self, 'custom_commission_class', None),
             strategy_module=getattr(self, 'strategy_module', None),
-            use_trade_log_metrics=getattr(self, 'use_trade_log_metrics', False)
+            use_trade_log_metrics=getattr(self, 'use_trade_log_metrics', False),
+            broker_config=broker_config
         )
         
         # 保存检测到的数据频率
@@ -160,6 +166,15 @@ class UniversalOptimizer:
                 print(f"自定义手续费类: {self.custom_commission_class.__name__}")
             if getattr(self, 'use_trade_log_metrics', False):
                 print(f"指标计算: 基于交易日志 (trade_log)")
+            if broker_config and broker_config.is_futures:
+                print(f"资产类型: 期货")
+                print(f"合约: {broker_config.contract_name or broker_config.contract_code} ({broker_config.contract_code})")
+                print(f"合约乘数: {broker_config.mult}")
+                print(f"保证金比例: {broker_config.margin*100:.1f}%")
+                comm_desc = f"{broker_config.commission}元/手" if broker_config.comm_type == 'FIXED' else f"费率{broker_config.commission}"
+                print(f"手续费: {comm_desc} ({'固定金额' if broker_config.comm_type == 'FIXED' else '百分比'})")
+            else:
+                print(f"资产类型: 股票")
             if isinstance(self.data, (list, tuple)):
                 print(f"数据点数: {len(self.data[0])} (多数据源: {len(self.data)} 个)")
             else:
@@ -308,6 +323,15 @@ class UniversalOptimizer:
         params = []
         all_param_names = []  # 记录所有参数名，用于验证
         
+        # 不应该被优化的参数黑名单（这些通常是固定的配置参数）
+        EXCLUDED_PARAMS = {
+            'printlog', 'verbose',  # 日志相关
+            'mult', 'margin',  # 期货合约固定参数
+            'commission',  # 手续费（应在回测引擎层面设置）
+            'percent',  # 资金分配比例（通常固定）
+            'stocklike', 'commtype', 'percabs',  # 手续费类内部参数
+        }
+        
         if hasattr(strategy_class, 'params'):
             for param_name in dir(strategy_class.params):
                 if not param_name.startswith('_'):
@@ -320,7 +344,14 @@ class UniversalOptimizer:
                     if not isinstance(default_value, (int, float)):
                         continue
                     
+                    # 记录所有数值参数（用于验证 target_params）
                     all_param_names.append(param_name)
+                    
+                    # 跳过黑名单中的参数
+                    if param_name.lower() in EXCLUDED_PARAMS:
+                        if self.verbose:
+                            print(f"[跳过] 参数 '{param_name}' 在黑名单中，不会被优化")
+                        continue
                     
                     # 如果指定了目标参数列表，只提取指定的参数
                     if self.target_params is not None:
@@ -775,6 +806,18 @@ class UniversalOptimizer:
             },
             "yearly_performance": {}
         }
+
+        # 添加经纪商配置信息（期货模式）
+        if self.broker_config and self.broker_config.is_futures:
+            result["broker_config"] = {
+                "asset_type": self.broker_config.asset_type,
+                "contract_code": self.broker_config.contract_code,
+                "contract_name": self.broker_config.contract_name,
+                "mult": self.broker_config.mult,
+                "margin": self.broker_config.margin,
+                "comm_type": self.broker_config.comm_type,
+                "commission": self.broker_config.commission,
+            }
         
         # 添加年度表现
         if best_result.yearly_returns:
