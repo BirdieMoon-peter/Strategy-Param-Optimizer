@@ -523,6 +523,7 @@ class UniversalOptimizer:
         best_value = float('-inf')
         expansion_round = 0
         all_history = []
+        all_best_improvements = []  # 收集所有轮次中每次发现更优参数的记录
         
         # 4. 优化循环（支持自动边界扩展）
         while True:
@@ -589,6 +590,12 @@ class UniversalOptimizer:
                 best_value = current_value
                 best_params = opt_result.best_params
                 best_result = opt_result.backtest_result
+            
+            # 收集该轮次的改进记录（跨轮次去重：按回测结果比较）
+            if opt_result.best_improvements:
+                for record in opt_result.best_improvements:
+                    if not all_best_improvements or all_best_improvements[-1]["backtest_results"] != record["backtest_results"]:
+                        all_best_improvements.append(record)
             
             # 检查是否需要扩展边界
             if not auto_expand_boundary or expansion_round >= max_expansion_rounds:
@@ -677,6 +684,8 @@ class UniversalOptimizer:
             result["optimization_info"]["exploitation_trials"] = exploitation_trials
             result["optimization_info"]["use_enhanced_sampler"] = use_enhanced_sampler and ENHANCED_SAMPLER_AVAILABLE
             result["optimization_info"]["dynamic_trials_enabled"] = enable_dynamic_trials
+            # 添加搜索过程中每次发现更优参数的记录
+            result["best_improvements"] = all_best_improvements
         except Exception as e:
             if self.verbose:
                 print(f"\n❌ 生成结果失败: {str(e)}")

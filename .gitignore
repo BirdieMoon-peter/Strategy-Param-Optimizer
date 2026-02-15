@@ -84,6 +84,9 @@ project_trend/
 *.csv
 multivwap/
 note.md
-策略调试/
+strategies/
 .claude/
 CLAUDE.md
+update.md
+spp_font_test/
+spp_results/

@@ -80,6 +80,7 @@ class OptimizationResult:
     backtest_result: BacktestResult
     n_trials: int
     optimization_time: float
+    best_improvements: List[Dict[str, Any]] = None  # 搜索过程中每次发现更优参数的记录
 
 
 class BayesianOptimizer:
@@ -212,7 +213,9 @@ class BayesianOptimizer:
         objective: str,
         history_list: List[Dict],
         verbose: bool = True,
-        phase: str = "exploitation"
+        phase: str = "exploitation",
+        best_improvements: List[Dict] = None,
+        initial_best_value: float = float('-inf')
     ) -> Callable:
         """
         创建Optuna目标函数
@@ -225,12 +228,14 @@ class BayesianOptimizer:
             history_list: 历史记录列表（用于存储）
             verbose: 是否打印详细信息
             phase: 当前阶段（exploration/exploitation）
+            best_improvements: 每次发现更优参数时的记录列表
+            initial_best_value: 初始最优值（用于继承上一阶段的最优值）
             
         Returns:
             目标函数
         """
         # 使用闭包变量跟踪当前最优值
-        best_value_tracker = {'value': float('-inf'), 'params': None}
+        best_value_tracker = {'value': initial_best_value, 'params': None}
         
         def objective_fn(trial: optuna.Trial) -> float:
             try:
@@ -278,6 +283,21 @@ class BayesianOptimizer:
             if value > best_value_tracker['value']:
                 best_value_tracker['value'] = value
                 best_value_tracker['params'] = params.copy()
+                
+                # 记录更优参数到改进列表（去重：跳过与上一条回测结果相同的记录）
+                if best_improvements is not None:
+                    new_results = {
+                        "sharpe_ratio": round(result.sharpe_ratio, 4),
+                        "annual_return": round(result.annual_return, 2),
+                        "max_drawdown": round(result.max_drawdown, 2)
+                    }
+                    # 仅当回测结果有实质性改善时才记录
+                    is_dup = bool(best_improvements) and best_improvements[-1]["backtest_results"] == new_results
+                    if not is_dup:
+                        best_improvements.append({
+                            "params": params.copy(),
+                            "backtest_results": new_results
+                        })
                 
                 # 实时输出更优参数
                 if verbose:
@@ -376,6 +396,7 @@ class BayesianOptimizer:
         
         # 初始化历史记录
         history_list = []
+        best_improvements = []  # 记录每次发现更优参数的快照
         start_time = datetime.now()
         
         # ============ 阶段1: 正态分布随机探索 ============
@@ -458,6 +479,18 @@ class BayesianOptimizer:
                     if value > best_exploration_value:
                         best_exploration_value = value
                         best_exploration_params = params.copy()
+                        
+                        # 记录更优参数到改进列表（去重）
+                        new_results = {
+                            "sharpe_ratio": round(result.sharpe_ratio, 4) if result else 0,
+                            "annual_return": round(result.annual_return, 2) if result else 0,
+                            "max_drawdown": round(result.max_drawdown, 2) if result else 0
+                        }
+                        if not best_improvements or best_improvements[-1]["backtest_results"] != new_results:
+                            best_improvements.append({
+                                "params": params.copy(),
+                                "backtest_results": new_results
+                            })
                         
                         # 发现更优参数时立即输出
                         if verbose:
@@ -551,7 +584,9 @@ class BayesianOptimizer:
         exploitation_history = []
         objective_fn = self._create_objective_function(
             strategy_class, data, search_space, objective, exploitation_history,
-            verbose=self.verbose, phase="exploitation"
+            verbose=self.verbose, phase="exploitation",
+            best_improvements=best_improvements,
+            initial_best_value=best_exploration_value
         )
         
         # 运行贝叶斯优化（添加异常处理）
@@ -646,7 +681,8 @@ class BayesianOptimizer:
             best_value=best_value if objective != "max_drawdown" else -best_value,
             backtest_result=best_result,
             n_trials=n_trials,
-            optimization_time=optimization_time
+            optimization_time=optimization_time,
+            best_improvements=best_improvements
         )
     
     def optimize_with_llm_feedback(
