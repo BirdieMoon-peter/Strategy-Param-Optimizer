@@ -20,3 +20,5 @@ scipy>=1.9.0
 
 # 可选：进度条
 tqdm>=4.64.0
+
+empyrical

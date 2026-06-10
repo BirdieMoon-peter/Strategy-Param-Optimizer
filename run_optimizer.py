@@ -254,8 +254,12 @@ def print_results(result: dict, output_dir: Path, asset_name: str = None):
             for i, insight in enumerate(explanation['key_insights'], 1):
                 print(f"  {i}. {insight}")
     
-    # 保存摘要
+    # 保存摘要。并行回测/用户策略可能改变工作目录或清理结果目录，
+    # 写文件前再次确保输出目录存在。
+    output_dir = Path(output_dir).expanduser()
+    output_dir.mkdir(parents=True, exist_ok=True)
     summary_path = output_dir / "optimization_summary.txt"
+    summary_path.parent.mkdir(parents=True, exist_ok=True)
     with open(summary_path, 'w', encoding='utf-8') as f:
         f.write("="*60 + "\n")
         f.write("策略优化结果摘要\n")
@@ -421,6 +425,37 @@ def main():
         type=int,
         default=10,
         help="做市商评分：最低交易次数门槛（默认: 10）"
+    )
+
+    # 并行优化参数（v3.0）
+    parser.add_argument(
+        "--no-parallel",
+        action="store_true",
+        help="禁用多进程并行（退回到 study.optimize 的串行/多线程模式，用于调试）"
+    )
+    parser.add_argument(
+        "--n-workers",
+        type=int,
+        default=120,
+        help="并行进程数（默认: 120，建议 CPU 核数 - 8）"
+    )
+    parser.add_argument(
+        "--explore-batch",
+        type=int,
+        default=128,
+        help="探索阶段每批并行 trial 数（默认: 128）"
+    )
+    parser.add_argument(
+        "--exploit-batch",
+        type=int,
+        default=32,
+        help="利用阶段每批并行 trial 数（默认: 32，越小 TPE 质量越高）"
+    )
+    parser.add_argument(
+        "--trial-timeout",
+        type=int,
+        default=300,
+        help="单个 trial 超时秒数，超时视为失败（默认: 300）"
     )
 
     # v2.0 新增：增强采样器参数
@@ -663,7 +698,7 @@ def main():
                 print(f"[LLM] 配置: {args.llm_type} / {args.llm_model}")
         
         # 2. 创建输出目录
-        output_dir = Path(args.output)
+        output_dir = Path(args.output).expanduser().resolve()
         output_dir.mkdir(parents=True, exist_ok=True)
         
         # 3. 批量优化每个数据文件 / 多数据源优化
@@ -731,14 +766,24 @@ def main():
                     if enable_dynamic:
                         print(f"[优化] 动态试验: 启用（将根据参数量自动调整）")
                     if enable_boundary:
-                        print(f"[优化] 边界二次搜索: 启用（最多{args.max_boundary_rounds}轮）\n")
+                        print(f"[优化] 边界二次搜索: 启用（最多{args.max_boundary_rounds}轮）")
+                    if args.no_parallel:
+                        print(f"[优化] 并行模式: 禁用 (串行)\n")
+                    else:
+                        print(f"[优化] 并行模式: 启用 (workers={args.n_workers}, "
+                              f"explore_batch={args.explore_batch}, exploit_batch={args.exploit_batch})\n")
                 
                 result = optimizer.optimize(
                     n_trials=args.trials,
                     use_enhanced_sampler=use_enhanced,
                     enable_dynamic_trials=enable_dynamic,
                     auto_expand_boundary=enable_boundary,
-                    max_expansion_rounds=args.max_boundary_rounds
+                    max_expansion_rounds=args.max_boundary_rounds,
+                    use_parallel=not args.no_parallel,
+                    n_workers=args.n_workers,
+                    explore_batch_size=args.explore_batch,
+                    exploit_batch_size=args.exploit_batch,
+                    trial_timeout=args.trial_timeout,
                 )
                 
                 # 打印和保存结果
@@ -812,14 +857,24 @@ def main():
                         if enable_dynamic:
                             print(f"[优化] 动态试验: 启用（将根据参数量自动调整）")
                         if enable_boundary:
-                            print(f"[优化] 边界二次搜索: 启用（最多{args.max_boundary_rounds}轮）\n")
+                            print(f"[优化] 边界二次搜索: 启用（最多{args.max_boundary_rounds}轮）")
+                        if args.no_parallel:
+                            print(f"[优化] 并行模式: 禁用 (串行)\n")
+                        else:
+                            print(f"[优化] 并行模式: 启用 (workers={args.n_workers}, "
+                                  f"explore_batch={args.explore_batch}, exploit_batch={args.exploit_batch})\n")
                     
                     result = optimizer.optimize(
                         n_trials=args.trials,
                         use_enhanced_sampler=use_enhanced,
                         enable_dynamic_trials=enable_dynamic,
                         auto_expand_boundary=enable_boundary,
-                        max_expansion_rounds=args.max_boundary_rounds
+                        max_expansion_rounds=args.max_boundary_rounds,
+                        use_parallel=not args.no_parallel,
+                        n_workers=args.n_workers,
+                        explore_batch_size=args.explore_batch,
+                        exploit_batch_size=args.exploit_batch,
+                        trial_timeout=args.trial_timeout,
                     )
                     
                     # 打印和保存结果
@@ -870,7 +925,9 @@ def main():
             print("-" * 60)
         
         # 5. 保存汇总报告
+        output_dir.mkdir(parents=True, exist_ok=True)
         summary_path = output_dir / "batch_optimization_summary.txt"
+        summary_path.parent.mkdir(parents=True, exist_ok=True)
         with open(summary_path, 'w', encoding='utf-8') as f:
             f.write("="*60 + "\n")
             f.write("批量策略优化结果汇总\n")
@@ -900,6 +957,7 @@ def main():
         
         # 保存JSON汇总
         json_summary_path = output_dir / "batch_optimization_summary.json"
+        json_summary_path.parent.mkdir(parents=True, exist_ok=True)
         json_summary = {
             'optimization_time': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
             'strategy': args.strategy,

@@ -23,7 +23,7 @@ import backtrader as bt
 
 from universal_llm_client import UniversalLLMClient, UniversalLLMConfig
 from backtest_engine import BacktestEngine, BacktestResult
-from bayesian_optimizer import BayesianOptimizer
+from bayesian_optimizer import BayesianOptimizer, OptimizationResult
 from config import StrategyParam, BayesianOptConfig, MarketMakerConfig
 from strategy_analyzer import SearchSpaceConfig as ParamSearchSpaceConfig
 from param_space_optimizer import ParamSpaceOptimizer
@@ -31,10 +31,23 @@ from futures_config import BrokerConfig, create_commission_info
 
 # 导入增强采样器
 try:
-    from enhanced_sampler import SamplerConfig, DynamicTrialsCalculator
+    from enhanced_sampler import (
+        SamplerConfig, DynamicTrialsCalculator, NormalDistributionSampler
+    )
     ENHANCED_SAMPLER_AVAILABLE = True
 except ImportError:
     ENHANCED_SAMPLER_AVAILABLE = False
+
+# 导入并行引擎
+try:
+    from parallel_engine import (
+        BatchParallelOptimizer,
+        WorkerInitArgs,
+        create_parallel_study,
+    )
+    PARALLEL_ENGINE_AVAILABLE = True
+except ImportError:
+    PARALLEL_ENGINE_AVAILABLE = False
 
 # 定义内部 SearchSpaceConfig
 @dataclass  
@@ -101,7 +114,7 @@ class UniversalOptimizer:
         self.market_maker_config = market_maker_config  # 做市商优化配置
 
         # 创建输出目录
-        self.output_dir = Path(output_dir)
+        self.output_dir = Path(output_dir).expanduser().resolve()
         self.output_dir.mkdir(parents=True, exist_ok=True)
         
         # 初始化参数空间优化器（需要在加载策略之前初始化）
@@ -444,7 +457,13 @@ class UniversalOptimizer:
         boundary_threshold: float = 0.1,
         expansion_factor: float = 1.5,
         use_enhanced_sampler: bool = True,
-        enable_dynamic_trials: bool = True
+        enable_dynamic_trials: bool = True,
+        use_parallel: bool = True,
+        n_workers: int = 120,
+        explore_batch_size: int = 128,
+        exploit_batch_size: int = 32,
+        trial_timeout: int = 300,
+        seed: int = 42,
     ) -> Dict[str, Any]:
         """
         执行优化（支持自动边界扩展、增强采样器和动态试验次数）
@@ -504,6 +523,13 @@ class UniversalOptimizer:
                 print(f"║ 试验次数: {actual_trials:<63} 次 ║")
             if use_enhanced_sampler and ENHANCED_SAMPLER_AVAILABLE:
                 print(f"║ 采样策略: {'正态分布 + 贝叶斯优化':<59} ║")
+            if use_parallel and PARALLEL_ENGINE_AVAILABLE:
+                print(f"║ 并行模式: 多进程 ProcessPoolExecutor (workers={n_workers}) {'':25} ║")
+                print(f"║   • 探索批大小: {explore_batch_size:<55} ║")
+                print(f"║   • 利用批大小: {exploit_batch_size:<55} ║")
+                print(f"║   • 单 trial 超时: {trial_timeout:<55}s ║")
+            else:
+                print(f"║ 并行模式: 串行 (study.optimize) {'':40} ║")
             if auto_expand_boundary:
                 print(f"║ 边界二次搜索: 启用 (最多{max_expansion_rounds}轮) {'':40} ║")
             print(f"╚{'═'*78}╝")
@@ -545,32 +571,43 @@ class UniversalOptimizer:
             search_space = self._convert_search_space(
                 SearchSpaceConfig(strategy_params=current_space)
             )
-            
-            # 创建优化器
-            optimizer = BayesianOptimizer(
-                config=bayesian_config,
-                backtest_engine=self.backtest_engine,
-                use_llm=False,
-                verbose=self.verbose
-            )
-            
+
             # 确定初始采样点（首轮用默认参数，后续轮用上一轮最优）
             init_params = default_params if expansion_round == 0 else best_params
-            
+
             # 执行优化（使用增强采样器，添加异常处理）
             try:
-                opt_result = optimizer.optimize_single_objective(
-                    strategy_class=self.strategy_class,
-                    strategy_name=self.strategy_info['class_name'],
-                    data=self.data,
-                    objective=self.objective,
-                    search_space=search_space,
-                    n_trials=round_trials,
-                    verbose=self.verbose,
-                    default_params=init_params,
-                    use_enhanced_sampler=use_enhanced_sampler and ENHANCED_SAMPLER_AVAILABLE,
-                    enable_dynamic_trials=enable_dynamic_trials
-                )
+                if use_parallel and PARALLEL_ENGINE_AVAILABLE:
+                    opt_result = self._run_parallel_round(
+                        search_space=search_space,
+                        n_trials=round_trials,
+                        default_params=init_params,
+                        use_enhanced_sampler=use_enhanced_sampler and ENHANCED_SAMPLER_AVAILABLE,
+                        n_workers=n_workers,
+                        explore_batch_size=explore_batch_size,
+                        exploit_batch_size=exploit_batch_size,
+                        trial_timeout=trial_timeout,
+                        seed=seed + expansion_round,
+                    )
+                else:
+                    optimizer = BayesianOptimizer(
+                        config=bayesian_config,
+                        backtest_engine=self.backtest_engine,
+                        use_llm=False,
+                        verbose=self.verbose
+                    )
+                    opt_result = optimizer.optimize_single_objective(
+                        strategy_class=self.strategy_class,
+                        strategy_name=self.strategy_info['class_name'],
+                        data=self.data,
+                        objective=self.objective,
+                        search_space=search_space,
+                        n_trials=round_trials,
+                        verbose=self.verbose,
+                        default_params=init_params,
+                        use_enhanced_sampler=use_enhanced_sampler and ENHANCED_SAMPLER_AVAILABLE,
+                        enable_dynamic_trials=enable_dynamic_trials
+                    )
             except Exception as e:
                 # 优化轮次失败，打印错误但尝试继续
                 if self.verbose:
@@ -687,6 +724,12 @@ class UniversalOptimizer:
             result["optimization_info"]["exploitation_trials"] = exploitation_trials
             result["optimization_info"]["use_enhanced_sampler"] = use_enhanced_sampler and ENHANCED_SAMPLER_AVAILABLE
             result["optimization_info"]["dynamic_trials_enabled"] = enable_dynamic_trials
+            result["optimization_info"]["use_parallel"] = use_parallel and PARALLEL_ENGINE_AVAILABLE
+            if use_parallel and PARALLEL_ENGINE_AVAILABLE:
+                result["optimization_info"]["n_workers"] = n_workers
+                result["optimization_info"]["explore_batch_size"] = explore_batch_size
+                result["optimization_info"]["exploit_batch_size"] = exploit_batch_size
+                result["optimization_info"]["trial_timeout"] = trial_timeout
             # 添加搜索过程中每次发现更优参数的记录
             result["best_improvements"] = all_best_improvements
         except Exception as e:
@@ -718,6 +761,141 @@ class UniversalOptimizer:
         
         return result
     
+    def _run_parallel_round(
+        self,
+        search_space: Dict[str, ParamSearchSpaceConfig],
+        n_trials: int,
+        default_params: Dict[str, Any],
+        use_enhanced_sampler: bool,
+        n_workers: int,
+        explore_batch_size: int,
+        exploit_batch_size: int,
+        trial_timeout: int,
+        seed: int = 42,
+    ) -> OptimizationResult:
+        """
+        使用 BatchParallelOptimizer 执行一轮真多进程并行优化。
+
+        返回与 BayesianOptimizer.optimize_single_objective 兼容的 OptimizationResult。
+        """
+        from datetime import datetime
+        start_time = datetime.now()
+
+        n_params = len(search_space)
+
+        # 探索/利用试验数拆分（与原逻辑保持一致）
+        if use_enhanced_sampler:
+            calculator = DynamicTrialsCalculator(SamplerConfig())
+            total_trials, exploration_trials, exploitation_trials = \
+                calculator.calculate_trials(n_params, search_space, n_trials)
+        else:
+            total_trials = n_trials
+            exploration_trials = int(n_trials * 0.3)
+            exploitation_trials = n_trials - exploration_trials
+
+        if self.verbose:
+            print(f"\n[并行优化] 总 trials={total_trials} "
+                  f"(探索={exploration_trials}, 利用={exploitation_trials}) | "
+                  f"workers={n_workers}")
+
+        # 预生成探索阶段样本（Trial 0 = 策略默认参数）
+        exploration_samples: List[Dict[str, Any]] = []
+        if use_enhanced_sampler and exploration_trials > 0:
+            sampler = NormalDistributionSampler(
+                SamplerConfig(), seed=seed
+            )
+            exploration_samples, _ = sampler.generate_initial_samples(
+                search_space=search_space,
+                n_samples=exploration_trials,
+                default_params=default_params,
+                include_default=True,
+            )
+
+        # 打包 worker 初始化参数
+        if isinstance(self.data_path, (list, tuple)):
+            data_paths = [str(p) for p in self.data_path]
+            is_multi = True
+        else:
+            data_paths = [str(self.data_path)]
+            is_multi = False
+
+        initial_cash = self.broker_config.initial_cash if self.broker_config else 100000.0
+        commission = (
+            self.broker_config.commission
+            if (self.broker_config and not self.broker_config.is_futures)
+            else 0.001
+        )
+
+        worker_init = WorkerInitArgs(
+            data_paths=data_paths,
+            strategy_path=str(self.strategy_path),
+            objective=self.objective,
+            broker_config=self.broker_config,
+            market_maker_config=self.market_maker_config,
+            data_frequency=self.data_frequency,
+            initial_cash=initial_cash,
+            commission=commission,
+            data_names=self.data_names,
+            is_multi_data=is_multi,
+        )
+
+        # 创建带 constant_liar 的 study
+        study = create_parallel_study(
+            direction="maximize",
+            seed=seed,
+            n_startup_trials=min(20, max(5, exploitation_trials // 5)),
+            constant_liar=True,
+        )
+
+        engine = BatchParallelOptimizer(
+            study=study,
+            search_space=search_space,
+            worker_init_args=worker_init,
+            n_exploit_trials=exploitation_trials,
+            exploration_samples=exploration_samples,
+            n_workers=n_workers,
+            explore_batch_size=explore_batch_size,
+            exploit_batch_size=exploit_batch_size,
+            timeout_per_trial=trial_timeout,
+            verbose=self.verbose,
+        )
+
+        best_params, best_value, _ = engine.run()
+
+        if not best_params:
+            raise RuntimeError("并行优化未产生任何有效结果")
+
+        # 在主进程用最佳参数跑一次完整回测（拿到 BacktestResult 对象）
+        final_params = dict(best_params)
+        try:
+            sig = inspect.signature(self.strategy_class.__init__)
+            accepts_verbose = 'verbose' in sig.parameters or any(
+                p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
+            )
+        except Exception:
+            accepts_verbose = False
+        if accepts_verbose:
+            final_params['verbose'] = False
+
+        best_result = self.backtest_engine.run_backtest(
+            strategy_class=self.strategy_class,
+            data=self.data,
+            params=final_params,
+            data_names=self.data_names,
+        )
+
+        elapsed = (datetime.now() - start_time).total_seconds()
+
+        return OptimizationResult(
+            objective=self.objective,
+            best_params=dict(best_params),
+            best_value=best_value,
+            backtest_result=best_result,
+            n_trials=len(engine.history),
+            optimization_time=elapsed,
+            best_improvements=list(engine.best_improvements),
+        )
+
     def _build_search_space(self) -> SearchSpaceConfig:
         """构建搜索空间"""
         if self.use_llm and self.llm_client:
@@ -871,7 +1049,9 @@ class UniversalOptimizer:
         """保存结果为JSON文件"""
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         filename = f"optimization_{self.asset_name}_{self.strategy_info['class_name']}_{timestamp}.json"
+        self.output_dir.mkdir(parents=True, exist_ok=True)
         filepath = self.output_dir / filename
+        filepath.parent.mkdir(parents=True, exist_ok=True)
         
         with open(filepath, 'w', encoding='utf-8') as f:
             json.dump(result, f, indent=2, ensure_ascii=False)
@@ -923,7 +1103,9 @@ class UniversalOptimizer:
         # 保存批量结果
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         filename = f"batch_optimization_{self.asset_name}_{self.strategy_info['class_name']}_{timestamp}.json"
+        self.output_dir.mkdir(parents=True, exist_ok=True)
         filepath = self.output_dir / filename
+        filepath.parent.mkdir(parents=True, exist_ok=True)
         
         with open(filepath, 'w', encoding='utf-8') as f:
             json.dump(batch_results, f, indent=2, ensure_ascii=False)
