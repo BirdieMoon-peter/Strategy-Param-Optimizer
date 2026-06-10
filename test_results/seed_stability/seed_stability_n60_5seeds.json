@@ -1,0 +1,150 @@
+{
+  "config": {
+    "seeds": [
+      1,
+      7,
+      42,
+      123,
+      2024
+    ],
+    "trials": 60,
+    "explore_ratio": 0.3,
+    "workers": 10,
+    "explore_batch": 10,
+    "exploit_batch": 8,
+    "trial_timeout": 180,
+    "objective": "sharpe_ratio",
+    "output": null
+  },
+  "stats_best_value": {
+    "mean": 10.95625248677639,
+    "std": 2.0340163215444895,
+    "min": 9.939244326004147,
+    "max": 15.02428512986537,
+    "median": 9.939244326004147,
+    "range": 5.085040803861224,
+    "cv": 0.18564890905895406
+  },
+  "runs": [
+    {
+      "seed": 1,
+      "best_value": 15.02428512986537,
+      "best_params": {
+        "volatility_window": 30,
+        "leverage": 2.3,
+        "target_volatility": 0.02,
+        "trade_frequency": 2,
+        "position_calculation_mode": 1,
+        "lookback": 1,
+        "VM": 1.0,
+        "mode": 3
+      },
+      "best_metrics": {
+        "sharpe_ratio": 15.02428512986537,
+        "annual_return": 108.41835891774743,
+        "max_drawdown": 0.0,
+        "total_return": 4.52264235211903,
+        "trades_count": 2,
+        "win_rate": 100.0
+      },
+      "elapsed_s": 110.0891809463501,
+      "failed_trials": 0
+    },
+    {
+      "seed": 7,
+      "best_value": 9.939244326004147,
+      "best_params": {
+        "volatility_window": 22,
+        "leverage": 1.1,
+        "target_volatility": 0.01,
+        "trade_frequency": 6,
+        "position_calculation_mode": 1,
+        "lookback": 5,
+        "VM": 1.4,
+        "mode": 7
+      },
+      "best_metrics": {
+        "sharpe_ratio": 9.939244326004147,
+        "annual_return": 31.511971271658233,
+        "max_drawdown": 0.3986856559739172,
+        "total_return": 4.995599691643976,
+        "trades_count": 5,
+        "win_rate": 60.0
+      },
+      "elapsed_s": 98.33611607551575,
+      "failed_trials": 0
+    },
+    {
+      "seed": 42,
+      "best_value": 9.939244326004147,
+      "best_params": {
+        "volatility_window": 21,
+        "leverage": 3.6,
+        "target_volatility": 0.01,
+        "trade_frequency": 6,
+        "position_calculation_mode": 1,
+        "lookback": 5,
+        "VM": 1.2000000000000002,
+        "mode": 7
+      },
+      "best_metrics": {
+        "sharpe_ratio": 9.939244326004147,
+        "annual_return": 31.511971271658233,
+        "max_drawdown": 0.3986856559739172,
+        "total_return": 4.995599691643976,
+        "trades_count": 5,
+        "win_rate": 60.0
+      },
+      "elapsed_s": 102.64286375045776,
+      "failed_trials": 0
+    },
+    {
+      "seed": 123,
+      "best_value": 9.939244326004147,
+      "best_params": {
+        "volatility_window": 26,
+        "leverage": 1.0,
+        "target_volatility": 0.015,
+        "trade_frequency": 5,
+        "position_calculation_mode": 1,
+        "lookback": 5,
+        "VM": 1.5,
+        "mode": 7
+      },
+      "best_metrics": {
+        "sharpe_ratio": 9.939244326004147,
+        "annual_return": 31.511971271658233,
+        "max_drawdown": 0.3986856559739172,
+        "total_return": 4.995599691643976,
+        "trades_count": 5,
+        "win_rate": 60.0
+      },
+      "elapsed_s": 115.90651965141296,
+      "failed_trials": 0
+    },
+    {
+      "seed": 2024,
+      "best_value": 9.939244326004147,
+      "best_params": {
+        "volatility_window": 17,
+        "leverage": 3.0,
+        "target_volatility": 0.025,
+        "trade_frequency": 4,
+        "position_calculation_mode": 1,
+        "lookback": 5,
+        "VM": 0.75,
+        "mode": 7
+      },
+      "best_metrics": {
+        "sharpe_ratio": 9.939244326004147,
+        "annual_return": 31.511971271658233,
+        "max_drawdown": 0.3986856559739172,
+        "total_return": 4.995599691643976,
+        "trades_count": 5,
+        "win_rate": 60.0
+      },
+      "elapsed_s": 99.50342392921448,
+      "failed_trials": 0
+    }
+  ]
+}
