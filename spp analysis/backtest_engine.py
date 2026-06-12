@@ -30,7 +30,11 @@ except ImportError:
     HAS_EMPYRICAL = False
     print("[警告] empyrical 未安装，将使用内置指标计算。建议运行: pip install empyrical")
 
-from config import BacktestConfig, DEFAULT_BACKTEST_CONFIG, get_annualization_factor
+# 添加项目根目录到路径
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+import math
+from config import BacktestConfig, DEFAULT_BACKTEST_CONFIG, get_annualization_factor, MarketMakerConfig
 from futures_config import BrokerConfig, create_commission_info
 
 
@@ -205,22 +209,25 @@ class PyfolioMetrics:
                     return self._sortino_ratio_fallback()
                 return result
             except Exception:
+                # empyrical 0.5.5 在 numpy>=2.0 下抛 AttributeError (np.NINF 已移除)，用内置实现代替
                 return self._sortino_ratio_fallback()
         else:
             return self._sortino_ratio_fallback()
-    
+
     def _sortino_ratio_fallback(self) -> float:
-        """内置索提诺比率计算"""
+        """内置索提诺比率计算（与 empyrical 公式一致）
+        分子：年化收益率
+        分母：下行半偏差 = sqrt(mean(min(r, 0)^2)) * sqrt(ann)
+        """
         if len(self.returns) < 2:
             return 0.0
-        downside_returns = self.returns[self.returns < 0]
-        if len(downside_returns) == 0:
-            # 没有负收益，返回一个较大的正值表示优秀
-            return 10.0 if self.returns.mean() > 0 else 0.0
-        downside_std = downside_returns.std()
-        if downside_std == 0 or np.isnan(downside_std):
-            return 10.0 if self.returns.mean() > 0 else 0.0
-        return np.sqrt(self.annualization_factor) * self.returns.mean() / downside_std
+        annual_ret = self._annual_return_fallback()
+        # semi-deviation：只对负收益平方取均值后开根号，再年化
+        downside_sq_mean = np.mean(np.minimum(self.returns, 0) ** 2)
+        semi_dev = np.sqrt(downside_sq_mean) * np.sqrt(self.annualization_factor)
+        if semi_dev == 0 or np.isnan(semi_dev):
+            return 10.0 if annual_ret > 0 else 0.0
+        return annual_ret / semi_dev
     
     def calmar_ratio(self) -> float:
         """计算卡玛比率 (年化收益 / 最大回撤)"""
@@ -384,13 +391,13 @@ class PyfolioMetrics:
             'sharpe_ratio': self._safe_metric(self.sharpe_ratio),
             'sortino_ratio': self._safe_metric(self.sortino_ratio),
             'calmar_ratio': self._safe_metric(self.calmar_ratio),
-            'max_drawdown': self._safe_metric(self.max_drawdown) * 100,  # 转为百分比
+            'max_drawdown': abs(self._safe_metric(self.max_drawdown)) * 100,  # 转为正值百分比（与 BacktestResult.max_drawdown 一致）
             'annual_return': self._safe_metric(self.annual_return) * 100,  # 转为百分比
             'total_return': self._safe_metric(self.total_return) * 100,  # 转为百分比
             'annual_volatility': self._safe_metric(self.annual_volatility) * 100,  # 转为百分比
             'omega_ratio': self._safe_metric(self.omega_ratio),
             'tail_ratio': self._safe_metric(self.tail_ratio),
-            'value_at_risk_5pct': self._safe_metric(lambda: self.value_at_risk(0.05)) * 100,
+            'value_at_risk_5pct': abs(self._safe_metric(lambda: self.value_at_risk(0.05))) * 100,  # 转为正值百分比；与 BacktestResult.value_at_risk 一致
         }
         
         # 添加 alpha/beta (如果有基准)
@@ -574,7 +581,7 @@ class BacktestEngine:
     """
     
     def __init__(
-        self, 
+        self,
         config: BacktestConfig = None,
         data: pd.DataFrame = None,
         strategy_class: Type[bt.Strategy] = None,
@@ -584,12 +591,18 @@ class BacktestEngine:
         custom_data_class: Type = None,
         custom_commission_class: Type = None,
         strategy_module: Any = None,
-        use_trade_log_metrics: bool = False,
-        broker_config: BrokerConfig = None
+        broker_config: BrokerConfig = None,
+        market_maker_config: 'MarketMakerConfig' = None,
+        data_timeframe: Any = None,
+        data_fromdate: Any = None,
+        data_todate: Any = None,
+        # 多数据源每源独立配置（与 data 列表/字典顺序对应）
+        data_timeframes: list = None,
+        data_time_fix_2359: list = None  # 对指定 source 应用 floor(D)+23:59 日线时间截
     ):
         """
         初始化回测引擎
-        
+
         Args:
             config: 回测配置
             data: DataFrame格式的数据（新接口）
@@ -600,9 +613,15 @@ class BacktestEngine:
             custom_data_class: 自定义数据类（继承自 bt.feeds.PandasData）
             custom_commission_class: 自定义手续费类（继承自 bt.CommInfoBase）
             strategy_module: 策略模块（用于查找自定义类）
-            use_trade_log_metrics: 是否优先使用策略的 trade_log 计算指标
+            market_maker_config: 做市商优化配置
+            data_timeframe: 数据时间框架 (bt.TimeFrame.Days/Minutes)，用于 DataFeed 创建
+            data_fromdate: 数据开始日期，用于 DataFeed 的 fromdate
+            data_todate:   数据结束日期，用于 DataFeed 的 todate
+            data_timeframes: 多数据源时每源独立的 timeframe 列表（覆盖 data_timeframe）
+            data_time_fix_2359: 多数据源时，哪些源需要 floor(D)+23:59 日线时间截（bool 列表）
         """
         self.config = config or DEFAULT_BACKTEST_CONFIG
+        self.market_maker_config = market_maker_config
         self.data_cache = {}
         
         # 新接口支持
@@ -618,7 +637,13 @@ class BacktestEngine:
         self.custom_data_class = custom_data_class
         self.custom_commission_class = custom_commission_class
         self.strategy_module = strategy_module
-        self.use_trade_log_metrics = use_trade_log_metrics
+
+        # DataFeed 属性
+        self.data_timeframe = data_timeframe
+        self.data_fromdate = data_fromdate
+        self.data_todate = data_todate
+        self.data_timeframes = data_timeframes  # 每源独立
+        self.data_time_fix_2359 = data_time_fix_2359  # 日线 23:59
 
         # 期货经纪商配置
         self.broker_config = broker_config
@@ -772,18 +797,23 @@ class BacktestEngine:
         params: Dict[str, Any] = None,
         asset_name: str = "ASSET",
         calculate_yearly: bool = True,
-        data_names: Optional[list] = None
+        data_names: Optional[list] = None,
+        eval_start: Optional[str] = None,
+        eval_end: Optional[str] = None
     ) -> Optional[BacktestResult]:
         """
         运行单次回测
-        
+
         Args:
             strategy_class: 策略类（可选，如果未提供则使用初始化时的策略）
             data: 行情数据（可选，如果未提供则使用初始化时的数据）
             params: 策略参数
             asset_name: 资产名称
             calculate_yearly: 是否计算每年的指标
-            
+            data_names: 多数据源时的名称列表
+            eval_start: 指标评估开始日期 (YYYY-MM-DD)，早于该日期的收益不参与指标计算
+            eval_end:   指标评估结束日期 (YYYY-MM-DD)，晚于该日期的收益不参与指标计算
+
         Returns:
             BacktestResult对象
         """
@@ -809,15 +839,28 @@ class BacktestEngine:
                 cerebro.broker.addcommissioninfo(comminfo)
             elif self.custom_commission_class is not None:
                 cerebro.broker.addcommissioninfo(self.custom_commission_class())
-            else:
+            elif self.config.commission is not None:
                 cerebro.broker.setcommission(commission=self.config.commission)
+            else:
+                # 没有指定手续费 → backtrader 默认不收费（commission=0）
+                pass
             
-            def _prepare_df(df: pd.DataFrame, use_custom_class: bool = False) -> pd.DataFrame:
+            def _prepare_df(df: pd.DataFrame, use_custom_class: bool = False,
+                            fix_2359: bool = False) -> pd.DataFrame:
                 data_copy = df.copy()
-                
+
                 # 对于自定义数据类，保留完整的列结构，只设置索引
                 if use_custom_class:
-                    if 'time_key' in data_copy.columns:
+                    # 日线 23:59 处理：与策略脚本一致，日线数据时间戳对齐全天末尾
+                    # 支持 time_key 和 datetime 两种列名（两者都可能被 _load_data 使用）
+                    if fix_2359:
+                        if 'time_key' in data_copy.columns:
+                            data_copy['time_key'] = pd.to_datetime(data_copy['time_key']).dt.floor('D') \
+                                                    + pd.Timedelta(hours=23, minutes=59)
+                        elif 'datetime' in data_copy.columns:
+                            data_copy['datetime'] = pd.to_datetime(data_copy['datetime']).dt.floor('D') \
+                                                    + pd.Timedelta(hours=23, minutes=59)
+                    if 'time_key' in data_copy.columns:      # 注意：time_key 经过 23:59 后可能已被转换
                         data_copy['Datetime'] = pd.to_datetime(data_copy['time_key'])
                         data_copy = data_copy.set_index('Datetime')
                     elif 'datetime' in data_copy.columns:
@@ -847,29 +890,57 @@ class BacktestEngine:
             # 选择数据类：优先使用自定义数据类
             DataClass = self.custom_data_class if self.custom_data_class is not None else bt.feeds.PandasData
             use_custom = self.custom_data_class is not None
-            
+
+            # 构建 DataFeed 的通用参数
+            feed_kwargs = {}
+            if self.data_timeframe is not None:
+                feed_kwargs['timeframe'] = self.data_timeframe
+            if self.data_fromdate is not None:
+                feed_kwargs['fromdate'] = self.data_fromdate
+            if self.data_todate is not None:
+                feed_kwargs['todate'] = self.data_todate
+
             # 添加数据（支持单数据/多数据源）
+            # 每源独立 timeframe（data_timeframes 优先）+ 日线 23:59 时间截
             if isinstance(data, dict):
-                for name, df in data.items():
-                    prepared = _prepare_df(df, use_custom)
-                    bt_data = DataClass(dataname=prepared, name=name)
+                for idx, (name, df) in enumerate(data.items()):
+                    tf = (self.data_timeframes[idx]
+                          if self.data_timeframes and idx < len(self.data_timeframes)
+                          else self.data_timeframe)
+                    fix2359 = (self.data_time_fix_2359[idx]
+                               if self.data_time_fix_2359 and idx < len(self.data_time_fix_2359)
+                               else False)
+                    kw = dict(feed_kwargs)
+                    if tf is not None: kw['timeframe'] = tf
+                    prepared = _prepare_df(df, use_custom, fix_2359=fix2359)
+                    bt_data = DataClass(dataname=prepared, name=name, **kw)
                     cerebro.adddata(bt_data)
             elif isinstance(data, (list, tuple)):
-                # 确定数据源名称
                 if data_names and len(data_names) == len(data):
                     names = data_names
                 elif isinstance(asset_name, (list, tuple)) and len(asset_name) == len(data):
                     names = list(asset_name)
                 else:
                     names = [f"ASSET{i+1}" for i in range(len(data))]
-                
-                for df, name in zip(data, names):
-                    prepared = _prepare_df(df, use_custom)
-                    bt_data = DataClass(dataname=prepared, name=name)
+
+                for idx, (df, name) in enumerate(zip(data, names)):
+                    tf = (self.data_timeframes[idx]
+                          if self.data_timeframes and idx < len(self.data_timeframes)
+                          else self.data_timeframe)
+                    fix2359 = (self.data_time_fix_2359[idx]
+                               if self.data_time_fix_2359 and idx < len(self.data_time_fix_2359)
+                               else False)
+                    kw = dict(feed_kwargs)
+                    if tf is not None: kw['timeframe'] = tf
+                    prepared = _prepare_df(df, use_custom, fix_2359=fix2359)
+                    bt_data = DataClass(dataname=prepared, name=name, **kw)
                     cerebro.adddata(bt_data)
             else:
-                prepared = _prepare_df(data, use_custom)
-                bt_data = DataClass(dataname=prepared, name=asset_name)
+                fix2359 = (self.data_time_fix_2359[0]
+                           if self.data_time_fix_2359 and len(self.data_time_fix_2359) > 0
+                           else False)
+                prepared = _prepare_df(data, use_custom, fix_2359=fix2359)
+                bt_data = DataClass(dataname=prepared, name=asset_name, **feed_kwargs)
                 cerebro.adddata(bt_data)
             
             # 添加策略（合并期货固定参数）
@@ -892,9 +963,11 @@ class BacktestEngine:
                 mult=self.broker_config.mult if _is_fut else 1,
             )
 
-            # 对于日内数据，使用 Daily timeframe 获取日收益率
-            # 这样后续计算年化指标时可以直接使用日线年化因子(252)
+            # 添加时间收益率分析器
+            # 使用 bt.analyzers.PyFolio（与策略脚本完全对齐）获取收益率序列
+            # 同时保留 TimeReturn 作为 fallback
             is_intraday = _is_intraday_frequency(self.config.data_frequency)
+            cerebro.addanalyzer(bt.analyzers.PyFolio, _name='pyfolio')
             if is_intraday:
                 cerebro.addanalyzer(bt.analyzers.TimeReturn, _name='timereturn',
                                    timeframe=bt.TimeFrame.Days)
@@ -904,6 +977,21 @@ class BacktestEngine:
             # 运行回测
             results = cerebro.run()
             strat = results[0]
+
+            # 提取收益率序列（优先 PyFolio → 对齐策略脚本）
+            timereturn = None
+            try:
+                pf_items = strat.analyzers.pyfolio.get_pf_items()
+                if pf_items is not None and len(pf_items) > 0 and pf_items[0] is not None:
+                    timereturn = pf_items[0]  # returns Series/DataFrame
+                else:
+                    timereturn = None
+            except Exception:
+                timereturn = None
+
+            # 如果 PyFolio 返回空，回退到 TimeReturn
+            if timereturn is None or (hasattr(timereturn, '__len__') and len(timereturn) == 0):
+                timereturn = strat.analyzers.timereturn.get_analysis()
 
             # 检查是否触发破产熔断
             bankruptcy_info = strat.analyzers.bankruptcy.get_analysis()
@@ -926,67 +1014,76 @@ class BacktestEngine:
                     omega_ratio=0,
                 )
 
-            # 提取 backtrader 的时间收益率，用于 pyfolio 风格的计算
-            timereturn = strat.analyzers.timereturn.get_analysis()
+            # 提取 backtrader 的收益率序列，用于 pyfolio 风格的计算
+            # 优先使用 PyFolio analyzer 输出（与策略脚本完全对齐）
+            timereturn = None
+            try:
+                pf_items = strat.analyzers.pyfolio.get_pf_items()
+                if pf_items is not None and len(pf_items) > 0 and pf_items[0] is not None:
+                    ret_raw = pf_items[0]  # PyFolio returns: 可能是 pd.Series 或 pd.DataFrame
+                    if isinstance(ret_raw, pd.Series):
+                        timereturn = ret_raw
+                    elif hasattr(ret_raw, 'reset_index'):
+                        # DataFrame → Series (取第一列或 pct_change)
+                        timereturn = ret_raw.iloc[:, 0] if ret_raw.shape[1] >= 1 else pd.Series(dtype=float)
+                    else:
+                        timereturn = pf_items[0]
+                else:
+                    timereturn = None
+            except Exception:
+                timereturn = None
+
+            # 如果 PyFolio 失败或返回空，回退到 TimeReturn
+            if timereturn is None or (hasattr(timereturn, '__len__') and len(timereturn) == 0):
+                timereturn = strat.analyzers.timereturn.get_analysis()
+
             trades = strat.analyzers.trades.get_analysis()
             final_value = cerebro.broker.getvalue()
-            
-            # 检查策略是否有 trade_log 属性，用于更精确的指标计算
+
+            # 从策略提取 trade_log（保留在 BacktestResult 中供查看，不参与指标计算）
             strategy_trade_log = getattr(strat, 'trade_log', None)
             has_trade_log = strategy_trade_log is not None and len(strategy_trade_log) > 0
-            
-            # 如果启用了 trade_log 指标计算且策略有 trade_log
-            if self.use_trade_log_metrics and has_trade_log:
-                # 使用策略自己记录的交易日志计算指标
-                trade_log_metrics = calculate_metrics_from_trade_log(
-                    strategy_trade_log, 
-                    initial_cash=self.config.initial_cash,
-                    final_value=final_value
-                )
-                
-                # 计算每年的指标（简化版，只取主要指标）
-                yearly_returns = {}
-                yearly_drawdowns = {}
-                yearly_sharpe = {}
-                
-                return BacktestResult(
-                    # 核心指标 (使用 trade_log 计算)
-                    total_return=trade_log_metrics.get('total_return', 0),
-                    annual_return=trade_log_metrics.get('annual_return', 0),
-                    max_drawdown=trade_log_metrics.get('max_drawdown', 0),
-                    sharpe_ratio=trade_log_metrics.get('sharpe_ratio', 0),
-                    final_value=final_value,
-                    trades_count=trade_log_metrics.get('trades_count', 0),
-                    win_rate=trade_log_metrics.get('win_rate', 0),
-                    params=params,
-                    # 额外指标
-                    profit_factor=trade_log_metrics.get('profit_factor', 0),
-                    sortino_ratio=0,  # trade_log 模式下暂不计算
-                    calmar_ratio=trade_log_metrics.get('annual_return', 0) / max(trade_log_metrics.get('max_drawdown', 1), 0.01),
-                    annual_volatility=0,
-                    omega_ratio=0,
-                    tail_ratio=0,
-                    value_at_risk=0,
-                    # 逐年指标
-                    yearly_returns=yearly_returns,
-                    yearly_drawdowns=yearly_drawdowns,
-                    yearly_sharpe=yearly_sharpe,
-                    # 收益率序列
-                    daily_returns=None,
-                    # 交易日志
-                    trade_log=strategy_trade_log
-                )
-            
-            # 构建收益率序列 (pyfolio 风格)
-            if timereturn and isinstance(timereturn, dict) and len(timereturn) > 0:
-                returns_series = pd.Series(timereturn)
-                returns_series.index = pd.to_datetime(returns_series.index)
-                returns_series = returns_series.sort_index()
-                # 过滤无效值
+
+            # 构建收益率序列
+            if timereturn is not None:
+                if isinstance(timereturn, pd.Series):
+                    returns_series = timereturn
+                elif isinstance(timereturn, dict):
+                    returns_series = pd.Series(timereturn)
+                else:
+                    returns_series = pd.Series(dtype=float)
+
+                # 统一时间处理
                 returns_series = returns_series.replace([np.inf, -np.inf], np.nan).dropna()
+                if not isinstance(returns_series.index, pd.DatetimeIndex):
+                    returns_series.index = pd.to_datetime(returns_series.index)
+                returns_series = returns_series.sort_index()
+
+                # PyFolio 返回的 index 可能是 tz-aware (UTC)，
+                # eval filter 用 pd.Timestamp 是 tz-naive，统一转 tz-naive
+                if returns_series.index.tz is not None:
+                    returns_series.index = returns_series.index.tz_localize(None)
             else:
                 returns_series = pd.Series(dtype=float)
-            
+
+            # 应用 eval period 过滤（对齐策略脚本中的 returns.loc[eval_start:eval_end]）
+            # warmup 期策略不交易（eval_start_date 内部过滤），但收益率序列仍包含零收益日
+            # 切除 warmup 后，年化/夏普/波动率等指标才能正确反映策略表现
+            # 应用 eval period 过滤（对齐策略脚本中的 returns.loc[eval_start:eval_end]）
+            # warmup 期策略不交易，但收益率序列仍包含零收益日
+            if eval_start is not None:
+                es = pd.Timestamp(eval_start)
+                returns_series = returns_series[returns_series.index >= es]
+            if eval_end is not None:
+                ee = pd.Timestamp(eval_end)
+                returns_series = returns_series[returns_series.index <= ee]
+
+            # PyFolio 天然不保留 eval 期边界外的零收益 bar，但 TimeReturn 会。
+            # 如果过滤后的末条是零收益（通常来自边界外），裁剪掉，保证与策略脚本的收益序列一致。
+            if len(returns_series) > 0 and returns_series.iloc[-1] == 0:
+                # 只裁剪末尾零收益 bar，保留中间的零收益 bar（策略无交易的日期）
+                returns_series = returns_series.iloc[:-1]
+
             # 使用 PyfolioMetrics 计算所有指标
             # 对于日内数据，TimeReturn 已经按日返回收益率，所以使用 'daily' 频率
             is_intraday = _is_intraday_frequency(self.config.data_frequency)
@@ -1002,17 +1099,20 @@ class BacktestEngine:
             won_trades = trades.get('won', {}).get('total', 0)
             win_rate = (won_trades / total_trades * 100) if total_trades > 0 else 0
             
-            # 计算每年的指标
+            # 计算每年的指标（从全程 TimeReturn 序列切片，避免每年重置资金和指标冷启动问题）
             yearly_returns = {}
             yearly_drawdowns = {}
             yearly_sharpe = {}
-            yearly_sharpe = {}
-            
-            if calculate_yearly:
-                yearly_stats = self._calculate_yearly_metrics(data, strategy_class, params, asset_name)
-                yearly_returns = yearly_stats.get('returns', {})
-                yearly_drawdowns = yearly_stats.get('drawdowns', {})
-                yearly_sharpe = yearly_stats.get('sharpe', {})
+
+            if calculate_yearly and len(returns_series) > 0:
+                for year in sorted(returns_series.index.year.unique()):
+                    yr = returns_series[returns_series.index.year == year]
+                    if len(yr) < 5:
+                        continue
+                    yr_metrics = PyfolioMetrics(yr, data_frequency=metrics_frequency)
+                    yearly_returns[year] = yr_metrics.total_return() * 100
+                    yearly_drawdowns[year] = abs(yr_metrics.max_drawdown()) * 100
+                    yearly_sharpe[year] = yr_metrics._safe_value(yr_metrics.sharpe_ratio())
             
             return BacktestResult(
                 # 核心指标 (使用 pyfolio/empyrical 计算)
@@ -1046,170 +1146,6 @@ class BacktestEngine:
             print(f"[错误] 回测执行失败: {e}")
             traceback.print_exc()
             return None
-    
-    def _calculate_yearly_metrics(
-        self,
-        data: pd.DataFrame,
-        strategy_class: Type[bt.Strategy],
-        params: Dict[str, Any],
-        asset_name: str
-    ) -> Dict[str, Dict[int, float]]:
-        """
-        计算每年的性能指标
-        
-        Args:
-            data: 行情数据（可以是单个DataFrame或多个DataFrame的列表/字典）
-            strategy_class: 策略类
-            params: 策略参数
-            asset_name: 资产名称
-            
-        Returns:
-            包含每年收益率、回撤和夏普比率的字典
-        """
-        yearly_returns = {}
-        yearly_drawdowns = {}
-        yearly_sharpe = {}
-        
-        # 处理多数据源 - 获取第一个数据源用于确定年份范围
-        if isinstance(data, dict):
-            first_data = list(data.values())[0] if data else None
-            data_dict = data
-            is_multi = True
-        elif isinstance(data, (list, tuple)):
-            first_data = data[0] if data else None
-            # 转换为字典格式
-            if isinstance(asset_name, (list, tuple)):
-                data_dict = {name: df for name, df in zip(asset_name, data)}
-            else:
-                data_dict = {f"ASSET{i+1}": df for i, df in enumerate(data)}
-            is_multi = True
-        else:
-            first_data = data
-            data_dict = {asset_name: data}
-            is_multi = False
-        
-        if first_data is None:
-            return {'returns': {}, 'drawdowns': {}, 'sharpe': {}}
-        
-        def _prepare_df(df: pd.DataFrame) -> pd.DataFrame:
-            """准备数据帧，设置日期索引"""
-            df_copy = df.copy()
-            if 'datetime' in df_copy.columns:
-                df_copy['datetime'] = pd.to_datetime(df_copy['datetime'])
-                df_copy = df_copy.set_index('datetime')
-            elif 'date' in df_copy.columns:
-                df_copy['date'] = pd.to_datetime(df_copy['date'])
-                df_copy = df_copy.set_index('date')
-            elif 'time_key' in df_copy.columns:
-                df_copy['time_key'] = pd.to_datetime(df_copy['time_key'])
-                df_copy = df_copy.set_index('time_key')
-            return df_copy
-        
-        # 准备所有数据
-        prepared_data = {name: _prepare_df(df) for name, df in data_dict.items()}
-        first_prepared = list(prepared_data.values())[0]
-        
-        if not isinstance(first_prepared.index, pd.DatetimeIndex):
-            return {'returns': {}, 'drawdowns': {}, 'sharpe': {}}
-        
-        # 获取所有年份
-        years = sorted(first_prepared.index.year.unique())
-        
-        for year in years:
-            try:
-                # 为每个数据源筛选该年的数据
-                year_data_dict = {}
-                min_rows = float('inf')
-                for name, df in prepared_data.items():
-                    year_df = df[df.index.year == year]
-                    year_data_dict[name] = year_df
-                    min_rows = min(min_rows, len(year_df))
-                
-                # 如果数据太少，跳过
-                if min_rows < 20:
-                    continue
-                
-                # 为该年运行回测
-                cerebro = bt.Cerebro(stdstats=True)
-                cerebro.broker.setcash(self.config.initial_cash)
-                cerebro.broker.setcommission(commission=self.config.commission)
-                
-                # 添加所有数据源
-                for name, df in year_data_dict.items():
-                    bt_data = bt.feeds.PandasData(dataname=df, name=name)
-                    cerebro.adddata(bt_data)
-                
-                cerebro.addstrategy(strategy_class, **params)
-
-                # 添加破产熔断分析器
-                _is_fut = self.broker_config is not None and self.broker_config.is_futures
-                cerebro.addanalyzer(
-                    BankruptcyAnalyzer, _name='bankruptcy',
-                    is_futures=_is_fut,
-                    margin=self.broker_config.margin if _is_fut else 0.0,
-                    mult=self.broker_config.mult if _is_fut else 1,
-                )
-
-                # 添加时间收益率分析器（对于日内数据使用 Daily timeframe）
-                is_intraday = _is_intraday_frequency(self.config.data_frequency)
-                if is_intraday:
-                    cerebro.addanalyzer(bt.analyzers.TimeReturn, _name='timereturn',
-                                       timeframe=bt.TimeFrame.Days)
-                else:
-                    cerebro.addanalyzer(bt.analyzers.TimeReturn, _name='timereturn')
-                
-                # 运行回测
-                results = cerebro.run()
-                strat = results[0]
-
-                # 检查是否触发破产熔断
-                bankruptcy_info = strat.analyzers.bankruptcy.get_analysis()
-                if bankruptcy_info['bankrupt']:
-                    yearly_returns[year] = -100.0
-                    yearly_drawdowns[year] = 100.0
-                    yearly_sharpe[year] = -10.0
-                    continue
-
-                # 提取时间收益率
-                timereturn = strat.analyzers.timereturn.get_analysis()
-                
-                # 构建收益率序列并使用 PyfolioMetrics 计算
-                if timereturn and isinstance(timereturn, dict) and len(timereturn) > 0:
-                    returns_series = pd.Series(timereturn)
-                    returns_series.index = pd.to_datetime(returns_series.index)
-                    returns_series = returns_series.sort_index()
-                    returns_series = returns_series.replace([np.inf, -np.inf], np.nan).dropna()
-                    
-                    # 使用 PyfolioMetrics 计算年度指标（日内数据已转为日收益率，使用 daily）
-                    metrics_frequency = 'daily' if is_intraday else self.config.data_frequency
-                    year_metrics = PyfolioMetrics(
-                        returns_series, 
-                        data_frequency=metrics_frequency
-                    )
-                    
-                    year_return = year_metrics.total_return() * 100
-                    year_drawdown = abs(year_metrics.max_drawdown()) * 100
-                    year_sharpe_ratio = year_metrics._safe_value(year_metrics.sharpe_ratio())
-                else:
-                    year_return = 0
-                    year_drawdown = 0
-                    year_sharpe_ratio = 0
-                
-                yearly_returns[year] = year_return
-                yearly_drawdowns[year] = year_drawdown
-                yearly_sharpe[year] = year_sharpe_ratio
-                
-            except Exception as e:
-                # 如果该年回测失败，记录空值
-                yearly_returns[year] = 0
-                yearly_drawdowns[year] = 0
-                yearly_sharpe[year] = 0
-        
-        return {
-            'returns': yearly_returns,
-            'drawdowns': yearly_drawdowns,
-            'sharpe': yearly_sharpe
-        }
     
     def evaluate_objective(
         self,

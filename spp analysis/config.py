@@ -232,3 +232,15 @@ class BayesianOptConfig:
 DEFAULT_LLM_CONFIG = LLMConfig()
 DEFAULT_BACKTEST_CONFIG = BacktestConfig()
 DEFAULT_BAYESIAN_CONFIG = BayesianOptConfig()
+
+
+@dataclass
+class MarketMakerConfig:
+    """做市商优化配置"""
+    alpha: float = 2.0       # 收益权重：鼓励正收益
+    beta: float = 4.0        # 回撤惩罚权重
+    gamma: float = 6.0       # 亏损额外惩罚权重
+    max_drawdown_threshold: float = 0.15  # 回撤容忍阈值
+    min_trades: int = 10     # 最低交易次数门槛
+
+
