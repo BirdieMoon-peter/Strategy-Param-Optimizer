@@ -159,7 +159,6 @@ class UniversalOptimizer:
             custom_data_class=getattr(self, 'custom_data_class', None),
             custom_commission_class=getattr(self, 'custom_commission_class', None),
             strategy_module=getattr(self, 'strategy_module', None),
-            use_trade_log_metrics=getattr(self, 'use_trade_log_metrics', False),
             broker_config=broker_config,
             market_maker_config=market_maker_config
         )
@@ -180,8 +179,6 @@ class UniversalOptimizer:
                 print(f"自定义数据类: {self.custom_data_class.__name__}")
             if getattr(self, 'custom_commission_class', None):
                 print(f"自定义手续费类: {self.custom_commission_class.__name__}")
-            if getattr(self, 'use_trade_log_metrics', False):
-                print(f"指标计算: 基于交易日志 (trade_log)")
             if broker_config and broker_config.is_futures:
                 print(f"资产类型: 期货")
                 print(f"合约: {broker_config.contract_name or broker_config.contract_code} ({broker_config.contract_code})")
@@ -300,8 +297,10 @@ class UniversalOptimizer:
         
         # 查找自定义手续费类（继承自 bt.CommInfoBase）
         self.custom_commission_class = None
+
+        # 第一轮：按 __module__ 匹配（精确）
         for name, obj in inspect.getmembers(module):
-            if (inspect.isclass(obj) and 
+            if (inspect.isclass(obj) and
                 obj.__module__ == module_name and
                 issubclass(obj, bt.CommInfoBase) and
                 obj is not bt.CommInfoBase):
@@ -309,18 +308,25 @@ class UniversalOptimizer:
                 if self.verbose:
                     print(f"[策略] 发现自定义手续费类: {obj.__name__}")
                 break
+
+        # 第二轮：如果 __module__ 匹配失败，尝试全模块扫描（fallback）
+        if self.custom_commission_class is None:
+            for name, obj in inspect.getmembers(module):
+                if (inspect.isclass(obj) and
+                    issubclass(obj, bt.CommInfoBase) and
+                    obj is not bt.CommInfoBase):
+                    self.custom_commission_class = obj
+                    if self.verbose:
+                        print(f"[策略] 发现自定义手续费类(fallback): {obj.__name__} (module={obj.__module__})")
+
+        if self.verbose and self.custom_commission_class is None:
+            print("[警告] 未检测到自定义手续费类，回测将使用简单百分比手续费")
+            print("       如果策略脚本使用了自定义手续费，请检查策略文件是否继承了 bt.CommInfoBase")
         
-        # 检查策略是否有 trade_log 属性（用于决定是否使用 trade_log 模式计算指标）
-        self.use_trade_log_metrics = hasattr(strategy_class, '__init__')
-        # 通过检查源码判断是否记录 trade_log
-        try:
-            source = inspect.getsource(strategy_class)
-            self.use_trade_log_metrics = 'trade_log' in source
-            if self.use_trade_log_metrics and self.verbose:
-                print(f"[策略] 检测到 trade_log，将使用交易日志计算指标")
-        except:
-            self.use_trade_log_metrics = False
-        
+        # 注意：不再自动启用 trade_log 指标模式
+        # 所有指标统一从 TimeReturn + empyrical 计算，与策略脚本的 pyfolio 路径一致
+        # trade_log 仅作为参考保存在 BacktestResult 中
+
         # 提取策略信息
         strategy_info = {
             'class_name': strategy_class.__name__,

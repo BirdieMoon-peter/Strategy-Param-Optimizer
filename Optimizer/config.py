@@ -225,7 +225,7 @@ def get_annualization_factor(data_frequency: str) -> float:
 class BacktestConfig:
     """回测配置"""
     initial_cash: float = 100000.0
-    commission: float = 0.0005
+    commission: float = None  # None = 必须显式指定；不会自动使用简单百分比手续费
     start_date: str = "2021-01-01"
     slippage: float = 0.0
     data_frequency: str = "daily"  # 数据频率：daily, 1m, 5m, 15m, 30m, hourly 等
