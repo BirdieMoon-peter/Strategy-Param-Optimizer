@@ -20,6 +20,7 @@ import backtrader as bt
 from backtest_engine import BacktestEngine
 from config import StrategyParam
 from spp_analyzer import SPPConfig, SPPAnalyzer
+from spp_parallel_engine import SPPWorkerInitArgs
 
 try:
     import futures_config as fc
@@ -258,6 +259,16 @@ def main():
                         choices=["stock", "futures"])
     parser.add_argument("--contract-code", default=None, help="期货合约代码")
     parser.add_argument("-q", "--quiet", action="store_true", help="静默模式")
+    parser.add_argument("--seed", type=int, default=None,
+                        help="蒙特卡洛随机种子（默认: 自动生成）")
+    parser.add_argument("--no-parallel", action="store_true",
+                        help="禁用 SPP 多进程并行，使用串行回测")
+    parser.add_argument("--n-workers", type=int, default=None,
+                        help="SPP 并行 worker 数（默认: CPU 核数 - 2，且不超过样本数）")
+    parser.add_argument("--batch-size", type=int, default=32,
+                        help="SPP 并行每批提交样本数（默认: 32）")
+    parser.add_argument("--sample-timeout", type=int, default=300,
+                        help="单个 SPP 样本回测超时秒数（默认: 300）")
 
     args = parser.parse_args()
 
@@ -451,14 +462,31 @@ def main():
         objective=objective,
         use_llm=args.use_llm,
         sensitive_params=sensitive_list,
-        random_seed=None,
+        random_seed=args.seed,
         record_samples=True,
+        use_parallel=not args.no_parallel,
+        n_workers=args.n_workers,
+        batch_size=args.batch_size,
+        sample_timeout=args.sample_timeout,
     )
+
+    parallel_worker_args = None
+    if spp_config.use_parallel:
+        parallel_worker_args = SPPWorkerInitArgs(
+            data_paths=[str(Path(dp).absolute()) for dp in args.data],
+            strategy_path=str(Path(args.strategy).absolute()),
+            objective=objective,
+            data_frequency=effective_freq,
+            broker_config=broker_config,
+            data_names=data_names,
+            is_multi_data=multi_data,
+        )
 
     analyzer = SPPAnalyzer(
         backtest_engine=engine, strategy_class=strategy_class,
         data=data, search_space=search_space,
-        config=spp_config, verbose=verbose, llm_client=llm_client)
+        config=spp_config, verbose=verbose, llm_client=llm_client,
+        parallel_worker_args=parallel_worker_args)
 
     # 9. 运行分析
     output_dir = os.path.join(args.output, asset_name)

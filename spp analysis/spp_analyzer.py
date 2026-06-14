@@ -44,6 +44,13 @@ plt.rcParams['axes.unicode_minus'] = False
 from backtest_engine import BacktestEngine, BacktestResult
 from config import StrategyParam
 
+try:
+    from spp_parallel_engine import SPPParallelEvaluator
+    SPP_PARALLEL_AVAILABLE = True
+except ImportError:
+    SPPParallelEvaluator = None
+    SPP_PARALLEL_AVAILABLE = False
+
 
 @dataclass
 class SPPConfig:
@@ -56,13 +63,18 @@ class SPPConfig:
     sensitive_params: Optional[List[str]] = None
     random_seed: Optional[int] = None
     record_samples: bool = True
+    use_parallel: bool = True
+    n_workers: Optional[int] = None
+    batch_size: int = 32
+    sample_timeout: int = 300
 
 
 class SPPAnalyzer:
     """SPP 鲁棒性分析器 (v3.0) — 最优参数邻域蒙特卡洛采样"""
 
     def __init__(self, backtest_engine, strategy_class, data, search_space,
-                 config=None, verbose=True, llm_client=None):
+                 config=None, verbose=True, llm_client=None,
+                 parallel_worker_args=None):
         self.engine = backtest_engine
         self.strategy_class = strategy_class
         self.data = data
@@ -70,6 +82,17 @@ class SPPAnalyzer:
         self.config = config or SPPConfig()
         self.verbose = verbose
         self.llm_client = llm_client
+        self.parallel_worker_args = parallel_worker_args
+        self.parallel_info = {
+            'use_parallel': False,
+            'available': SPP_PARALLEL_AVAILABLE,
+            'n_workers': 1,
+            'batch_size': None,
+            'sample_timeout': None,
+            'failed_samples': 0,
+            'failed_sample_details': [],
+            'fallback_reason': None,
+        }
 
     # ---- 敏感参数识别 ----
 
@@ -183,8 +206,18 @@ class SPPAnalyzer:
 
     # ---- 批量回测 ----
 
-    def _evaluate_batch(self, param_list, desc=""):
-        """批量回测，收集完整结果到 DataFrame"""
+    def _evaluate_batch_serial(self, param_list, desc=""):
+        """串行批量回测，收集完整结果到 DataFrame"""
+        self.parallel_info = {
+            'use_parallel': False,
+            'available': SPP_PARALLEL_AVAILABLE,
+            'n_workers': 1,
+            'batch_size': None,
+            'sample_timeout': None,
+            'failed_samples': 0,
+            'failed_sample_details': [],
+            'fallback_reason': None,
+        }
         records = []
         total = len(param_list)
         start = time.time()
@@ -210,6 +243,64 @@ class SPPAnalyzer:
                 remaining = (total - i - 1) / rate if rate > 0 else 0
                 print(f"  [{desc}] {i+1}/{total} ({100*(i+1)/total:.0f}%) 剩余 {remaining:.0f}s")
         return pd.DataFrame(records)
+
+    def _evaluate_batch_parallel(self, param_list, desc=""):
+        """并行批量回测，worker 只负责回测，父进程统一汇总。"""
+        total = len(param_list)
+        n_workers = self.config.n_workers
+        if n_workers is None:
+            cpu_count = os.cpu_count() or 1
+            n_workers = max(1, min(total, cpu_count - 2 if cpu_count > 2 else 1))
+        else:
+            n_workers = max(1, min(int(n_workers), total))
+
+        if self.verbose:
+            print(f"  [并行] workers={n_workers}, batch_size={self.config.batch_size}, "
+                  f"timeout={self.config.sample_timeout}s")
+
+        evaluator = SPPParallelEvaluator(
+            worker_init_args=self.parallel_worker_args,
+            n_workers=n_workers,
+            batch_size=self.config.batch_size,
+            sample_timeout=self.config.sample_timeout,
+            verbose=self.verbose,
+        )
+        records = evaluator.evaluate(param_list, desc=desc)
+        self.parallel_info = {
+            'use_parallel': True,
+            'available': True,
+            'n_workers': n_workers,
+            'batch_size': self.config.batch_size,
+            'sample_timeout': self.config.sample_timeout,
+            'failed_samples': len(evaluator.failed_samples),
+            'failed_sample_details': evaluator.failed_samples[:20],
+            'fallback_reason': None,
+        }
+        return pd.DataFrame(records)
+
+    def _evaluate_batch(self, param_list, desc=""):
+        """批量回测，按配置选择串行或多进程并行。"""
+        if not param_list:
+            return pd.DataFrame([])
+
+        if not self.config.use_parallel:
+            return self._evaluate_batch_serial(param_list, desc=desc)
+
+        if not SPP_PARALLEL_AVAILABLE:
+            if self.verbose:
+                print("  [警告] SPP 并行执行器不可用，回退到串行")
+            df = self._evaluate_batch_serial(param_list, desc=desc)
+            self.parallel_info['fallback_reason'] = 'parallel_engine_unavailable'
+            return df
+
+        if self.parallel_worker_args is None:
+            if self.verbose:
+                print("  [警告] 未提供并行 worker 初始化参数，回退到串行")
+            df = self._evaluate_batch_serial(param_list, desc=desc)
+            self.parallel_info['fallback_reason'] = 'missing_worker_args'
+            return df
+
+        return self._evaluate_batch_parallel(param_list, desc=desc)
 
     def _serialize_mc_samples(self, mc_df):
         """将 Monte Carlo 结果转换为可序列化的精简样本列表"""
@@ -258,6 +349,7 @@ class SPPAnalyzer:
             'perturbation_ratio': self.config.perturbation_ratio,
             'random_seed': self.config.random_seed,
             'sensitive_params_method': method,
+            'parallel_info': self.parallel_info,
         }
         sample_records = self._serialize_mc_samples(df)
 
@@ -649,6 +741,10 @@ class SPPAnalyzer:
                     'use_llm': self.config.use_llm,
                     'random_seed': self.config.random_seed,
                     'record_samples': self.config.record_samples,
+                    'use_parallel': self.config.use_parallel,
+                    'n_workers': self.config.n_workers,
+                    'batch_size': self.config.batch_size,
+                    'sample_timeout': self.config.sample_timeout,
                 },
             },
             'best_parameters': best_params,
@@ -663,6 +759,7 @@ class SPPAnalyzer:
             result['spp_info'].update(provenance)
         result['spp_info']['random_seed'] = self.config.random_seed
         result['spp_info']['record_samples'] = self.config.record_samples
+        result['parallel_info'] = self.parallel_info
 
         # 敏感参数信息
         result['sensitive_params'] = {
