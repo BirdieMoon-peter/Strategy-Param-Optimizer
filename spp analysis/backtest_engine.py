@@ -598,7 +598,8 @@ class BacktestEngine:
         data_todate: Any = None,
         # 多数据源每源独立配置（与 data 列表/字典顺序对应）
         data_timeframes: list = None,
-        data_time_fix_2359: list = None  # 对指定 source 应用 floor(D)+23:59 日线时间截
+        data_time_fix_2359: list = None,  # 对指定 source 应用 floor(D)+23:59 日线时间截
+        use_trade_log_metrics: bool = False
     ):
         """
         初始化回测引擎
@@ -619,10 +620,12 @@ class BacktestEngine:
             data_todate:   数据结束日期，用于 DataFeed 的 todate
             data_timeframes: 多数据源时每源独立的 timeframe 列表（覆盖 data_timeframe）
             data_time_fix_2359: 多数据源时，哪些源需要 floor(D)+23:59 日线时间截（bool 列表）
+            use_trade_log_metrics: 兼容主优化器接口；当前 SPP 引擎保留该标志
         """
         self.config = config or DEFAULT_BACKTEST_CONFIG
         self.market_maker_config = market_maker_config
         self.data_cache = {}
+        self.use_trade_log_metrics = use_trade_log_metrics
         
         # 新接口支持
         self.data_df = data

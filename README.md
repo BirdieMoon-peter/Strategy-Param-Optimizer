@@ -145,6 +145,8 @@ pip install -r requirements.txt
 | `--no-dynamic-trials` | 关闭 | 禁用动态试验次数，使用 `--trials` 指定的固定值 |
 | `--no-boundary-search` | 关闭 | 禁用边界二次搜索 |
 | `--max-boundary-rounds` | `2` | 边界二次搜索最大轮数 |
+| `--boundary-threshold` | `0.1` | 最优参数落在搜索区间前/后多少比例内时触发边界拓展 |
+| `--boundary-expansion-factor` | `1.5` | 每轮边界拓展后的目标区间倍数，必须大于 `1` |
 
 #### LLM 参数
 
@@ -367,6 +369,8 @@ JSON 格式，手动指定各参数的搜索范围和分布类型：
     "period": {
       "min": 10,
       "max": 50,
+      "hard_min": 5,
+      "hard_max": 80,
       "step": 1,
       "distribution": "int_uniform"
     },
@@ -379,6 +383,82 @@ JSON 格式，手动指定各参数的搜索范围和分布类型：
   }
 }
 ```
+
+`min` / `max` 是本轮初始搜索范围；`hard_min` / `hard_max` 是可选硬性边界。启用自动边界二次搜索时，参数空间可以继续向外扩展，但不会突破对应的硬边界。未设置硬边界的参数保持原来的自动扩展行为。
+
+边界拓展范围由命令行参数控制：`--boundary-threshold` 决定多接近边界才触发二次搜索，`--boundary-expansion-factor` 决定每轮向外扩展多少。扩展按当前区间宽度计算，例如 `[10, 50]` 使用 `--boundary-expansion-factor 1.5` 且最优值接近上界时，会优先尝试扩到 `[10, 70]`，再受 `hard_max` 裁剪。
+
+##### 边界限制用法
+
+使用 `hard_min` / `hard_max` 可以限制自动边界扩展的最大搜索范围，防止某些参数被扩到策略不接受或业务上无意义的值。
+
+只限制上界：
+
+```json
+{
+  "param_space": {
+    "period": {
+      "min": 10,
+      "max": 50,
+      "hard_max": 80,
+      "step": 1,
+      "distribution": "int_uniform"
+    }
+  }
+}
+```
+
+只限制下界：
+
+```json
+{
+  "param_space": {
+    "threshold": {
+      "min": 0.01,
+      "max": 0.2,
+      "hard_min": 0.0,
+      "step": null,
+      "distribution": "uniform"
+    }
+  }
+}
+```
+
+锁定某个参数不允许继续拓宽：把 `hard_min` / `hard_max` 设成当前 `min` / `max`。
+
+```json
+{
+  "param_space": {
+    "period": {
+      "min": 10,
+      "max": 50,
+      "hard_min": 10,
+      "hard_max": 50,
+      "step": 1,
+      "distribution": "int_uniform"
+    }
+  }
+}
+```
+
+配合命令行调整触发阈值和拓宽倍数：
+
+```bash
+python run_optimizer.py \
+  --data data.csv \
+  --strategy strategy.py \
+  --space-config param_space.json \
+  --boundary-threshold 0.2 \
+  --boundary-expansion-factor 2.0
+```
+
+例如参数 `period` 初始范围为 `[10, 20]`，最优值接近上界：
+
+| 设置 | 自动拓宽结果 |
+|------|--------------|
+| `--boundary-expansion-factor 2.0` | `[10, 30]` |
+| `--boundary-expansion-factor 3.0` | `[10, 40]` |
+| `--boundary-expansion-factor 5.0` 且 `hard_max=45` | `[10, 45]` |
 
 `distribution` 可选值：
 
@@ -503,18 +583,24 @@ spp_results/
 当最优参数落在搜索空间边界时，自动扩展范围并进行二次搜索：
 
 ```
-判定条件: 最优值位于 min/max 的 10% 范围内即视为"触及边界"
+判定条件: 最优值位于 min/max 的边界阈值范围内即视为"触及边界"
+默认阈值: 0.1，可通过 --boundary-threshold 调整
 
 扩展策略:
-  - 扩展因子: 1.5x（向触及的方向扩展）
-  - 每轮额外试验: 20 次
-  - 最大扩展轮数: 2 轮
+  - 扩展因子: 默认 1.5x，可通过 --boundary-expansion-factor 调整
+  - 扩展方式: 按当前区间宽度向触及边界的方向扩展
+  - 硬性边界: hard_min / hard_max 会裁剪最终范围
+  - 最大扩展轮数: 默认 2 轮，可通过 --max-boundary-rounds 调整
 
 示例:
   参数 period 搜索范围 [10, 50]，最优值 = 48（触及上界）
-  → 第1轮扩展: 范围变为 [10, 75]，额外搜索 20 次
-  → 若最优值仍触及边界 → 第2轮扩展: [10, 112]
+  → 第1轮扩展: 范围变为 [10, 70]
+  → 若最优值仍触及边界 → 第2轮扩展: [10, 100]
   → 最多 2 轮后停止
+
+如果配置 hard_max=80:
+  → 第1轮扩展仍为 [10, 70]
+  → 第2轮会被裁剪为 [10, 80]
 ```
 
 ### 5.4 动态试验次数
@@ -633,7 +719,7 @@ SPP (System Parameter Permutation) 通过蒙特卡洛扰动评估最优参数的
 ### v2.0 (2026-01-29) — 自适应参数空间
 
 - 自适应参数空间生成（默认值 ±30%）
-- 自动边界扩展（1.5x，最多 2 轮）
+- 自动边界扩展（默认 1.5x、最多 2 轮，可通过 CLI 与硬边界配置调整）
 - 专业指标计算（empyrical 库）
 - Trial 0 使用策略默认参数作为基线
 - 批量处理支持（多 CSV 文件）

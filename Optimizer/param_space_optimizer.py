@@ -6,6 +6,7 @@
 
 import os
 import sys
+import math
 from typing import Dict, List, Any, Optional, Tuple
 from dataclasses import dataclass, field
 import numpy as np
@@ -257,7 +258,9 @@ class ParamSpaceOptimizer:
                 description=f"{param.description} [{matched_rule.description}]",
                 min_value=min_val,
                 max_value=max_val,
-                step=step
+                step=step,
+                hard_min=getattr(param, 'hard_min', None),
+                hard_max=getattr(param, 'hard_max', None)
             )
             
         else:
@@ -278,7 +281,9 @@ class ParamSpaceOptimizer:
                 description=param.description,
                 min_value=min_val,
                 max_value=max_val,
-                step=step
+                step=step,
+                hard_min=getattr(param, 'hard_min', None),
+                hard_max=getattr(param, 'hard_max', None)
             )
         
         return optimized
@@ -362,6 +367,13 @@ class ParamSpaceOptimizer:
                 range_str += f" (步长: {param.step})"
             
             print(f"  {param.name:20s} | 类型: {param.param_type:6s} | 范围: {range_str}")
+            hard_bounds = []
+            if getattr(param, 'hard_min', None) is not None:
+                hard_bounds.append(f"hard_min={param.hard_min}")
+            if getattr(param, 'hard_max', None) is not None:
+                hard_bounds.append(f"hard_max={param.hard_max}")
+            if hard_bounds:
+                print(f"  {'':20s}   硬边界: {', '.join(hard_bounds)}")
             if param.description and "[" in param.description:
                 desc_parts = param.description.split("[")
                 if len(desc_parts) > 1:
@@ -426,29 +438,95 @@ class ParamSpaceOptimizer:
             
             # 检查是否在边界附近（10%阈值）
             if relative_pos < 0.1:
+                hard_min = getattr(param_def, 'hard_min', None)
                 analysis["boundary_params"].append({
                     "param": param_name,
                     "side": "lower",
                     "value": param_value,
-                    "boundary": param_def.min_value
+                    "boundary": param_def.min_value,
+                    "hard_boundary": hard_min
                 })
-                analysis["suggestions"].append(
-                    f"参数 '{param_name}' 接近下界 ({param_value:.4f} ≈ {param_def.min_value:.4f})，"
-                    f"建议扩大搜索范围到更小的值"
-                )
+                if hard_min is not None and param_def.min_value <= hard_min:
+                    analysis["suggestions"].append(
+                        f"参数 '{param_name}' 接近硬下界 ({param_value:.4f} ≈ {hard_min:.4f})，"
+                        f"自动边界扩展不会继续突破该下界"
+                    )
+                else:
+                    analysis["suggestions"].append(
+                        f"参数 '{param_name}' 接近下界 ({param_value:.4f} ≈ {param_def.min_value:.4f})，"
+                        f"建议扩大搜索范围到更小的值"
+                    )
             elif relative_pos > 0.9:
+                hard_max = getattr(param_def, 'hard_max', None)
                 analysis["boundary_params"].append({
                     "param": param_name,
                     "side": "upper",
                     "value": param_value,
-                    "boundary": param_def.max_value
+                    "boundary": param_def.max_value,
+                    "hard_boundary": hard_max
                 })
-                analysis["suggestions"].append(
-                    f"参数 '{param_name}' 接近上界 ({param_value:.4f} ≈ {param_def.max_value:.4f})，"
-                    f"建议扩大搜索范围到更大的值"
-                )
+                if hard_max is not None and param_def.max_value >= hard_max:
+                    analysis["suggestions"].append(
+                        f"参数 '{param_name}' 接近硬上界 ({param_value:.4f} ≈ {hard_max:.4f})，"
+                        f"自动边界扩展不会继续突破该上界"
+                    )
+                else:
+                    analysis["suggestions"].append(
+                        f"参数 '{param_name}' 接近上界 ({param_value:.4f} ≈ {param_def.max_value:.4f})，"
+                        f"建议扩大搜索范围到更大的值"
+                    )
         
         return analysis
+
+    def _expanded_lower_bound(
+        self,
+        param_def: StrategyParam,
+        param_range: float,
+        expansion_factor: float,
+        hard_min: Optional[float]
+    ) -> float:
+        """按当前区间宽度向下扩展，避免 0/负数范围下乘除法反向收缩。"""
+        raw_min = param_def.min_value - param_range * (expansion_factor - 1)
+
+        if param_def.param_type == "int":
+            new_min = math.floor(raw_min)
+            if hard_min is not None:
+                lower_limit = math.ceil(hard_min)
+            elif param_def.min_value >= 1:
+                lower_limit = 1
+            elif param_def.min_value >= 0:
+                lower_limit = 0
+            else:
+                lower_limit = new_min
+            return int(max(lower_limit, new_min))
+
+        if hard_min is not None:
+            lower_limit = hard_min
+        elif param_def.min_value > 0:
+            lower_limit = 0.0001 if param_def.min_value >= 0.0001 else 0.0
+        else:
+            lower_limit = raw_min
+        return max(lower_limit, raw_min)
+
+    def _expanded_upper_bound(
+        self,
+        param_def: StrategyParam,
+        param_range: float,
+        expansion_factor: float,
+        hard_max: Optional[float]
+    ) -> float:
+        """按当前区间宽度向上扩展，并裁剪到硬上界。"""
+        raw_max = param_def.max_value + param_range * (expansion_factor - 1)
+
+        if param_def.param_type == "int":
+            new_max = math.ceil(raw_max)
+            if hard_max is not None:
+                new_max = min(new_max, math.floor(hard_max))
+            return int(new_max)
+
+        if hard_max is not None:
+            raw_max = min(raw_max, hard_max)
+        return raw_max
     
     def expand_boundary_params(
         self,
@@ -493,34 +571,45 @@ class ParamSpaceOptimizer:
             new_min = param_def.min_value
             new_max = param_def.max_value
             needs_expansion = False
+            hard_min = getattr(param_def, 'hard_min', None)
+            hard_max = getattr(param_def, 'hard_max', None)
             
             # 检查是否在边界附近
             if relative_pos < boundary_threshold:  # 接近下界
                 needs_expansion = True
-                if param_def.param_type == "int":
-                    new_min = max(1, int(param_def.min_value / expansion_factor))
-                else:
-                    new_min = max(0.0001, param_def.min_value / expansion_factor)
+                new_min = self._expanded_lower_bound(
+                    param_def,
+                    param_range,
+                    expansion_factor,
+                    hard_min
+                )
                     
             elif relative_pos > (1 - boundary_threshold):  # 接近上界
                 needs_expansion = True
-                if param_def.param_type == "int":
-                    new_max = int(param_def.max_value * expansion_factor)
-                else:
-                    new_max = param_def.max_value * expansion_factor
+                new_max = self._expanded_upper_bound(
+                    param_def,
+                    param_range,
+                    expansion_factor,
+                    hard_max
+                )
             
             if needs_expansion:
-                expanded_params.append(param_name)
-                expanded_param = StrategyParam(
-                    name=param_def.name,
-                    param_type=param_def.param_type,
-                    default_value=param_def.default_value,
-                    description=param_def.description,
-                    min_value=new_min,
-                    max_value=new_max,
-                    step=param_def.step
-                )
-                expanded_space.append(expanded_param)
+                if new_min == param_def.min_value and new_max == param_def.max_value:
+                    expanded_space.append(param_def)
+                else:
+                    expanded_params.append(param_name)
+                    expanded_param = StrategyParam(
+                        name=param_def.name,
+                        param_type=param_def.param_type,
+                        default_value=param_def.default_value,
+                        description=param_def.description,
+                        min_value=new_min,
+                        max_value=new_max,
+                        step=param_def.step,
+                        hard_min=hard_min,
+                        hard_max=hard_max
+                    )
+                    expanded_space.append(expanded_param)
             else:
                 expanded_space.append(param_def)
         
@@ -606,18 +695,24 @@ class ParamSpaceOptimizer:
             
             new_min = param_def.min_value
             new_max = param_def.max_value
+            hard_min = getattr(param_def, 'hard_min', None)
+            hard_max = getattr(param_def, 'hard_max', None)
             
             # 如果参数在边界附近，扩展范围
             if relative_pos < 0.1:  # 接近下界
-                if param_def.param_type == "int":
-                    new_min = max(1, int(param_def.min_value / expansion_factor))
-                else:
-                    new_min = max(0.0001, param_def.min_value / expansion_factor)
+                new_min = self._expanded_lower_bound(
+                    param_def,
+                    param_range,
+                    expansion_factor,
+                    hard_min
+                )
             elif relative_pos > 0.9:  # 接近上界
-                if param_def.param_type == "int":
-                    new_max = int(param_def.max_value * expansion_factor)
-                else:
-                    new_max = param_def.max_value * expansion_factor
+                new_max = self._expanded_upper_bound(
+                    param_def,
+                    param_range,
+                    expansion_factor,
+                    hard_max
+                )
             else:
                 # 参数在中间，可以缩小范围聚焦搜索
                 center = param_value
@@ -637,7 +732,9 @@ class ParamSpaceOptimizer:
                 description=param_def.description,
                 min_value=new_min,
                 max_value=new_max,
-                step=param_def.step
+                step=param_def.step,
+                hard_min=hard_min,
+                hard_max=hard_max
             )
             refined_space.append(refined_param)
         

@@ -79,7 +79,14 @@ python run_spp_analysis.py \
 | `--use-llm` | 启用 LLM 辅助识别敏感参数 | 否 |
 | `--llm-model` | LLM 模型名称 | xuanyuan |
 | `--sensitive-params` | 手动指定敏感参数 (逗号分隔) | — |
+| `--seed` | 蒙特卡洛随机种子，用于复现采样 | 自动生成 |
+| `--no-parallel` | 禁用多进程并行，使用串行回测 | 否 |
+| `--n-workers` | 并行 worker 数 | CPU 核数 - 2 |
+| `--batch-size` | 并行每批提交样本数 | 32 |
+| `--sample-timeout` | 单个样本回测超时秒数 | 300 |
 | `-q, --quiet` | 静默模式 | 否 |
+
+默认启用 SPP 多进程并行。父进程负责生成 Monte Carlo 参数样本和写 JSON/PNG，worker 只执行回测；同一个 `--seed` 下，串行与并行使用相同的样本集合。
 
 ### 策略兼容性
 

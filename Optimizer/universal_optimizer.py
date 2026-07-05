@@ -434,6 +434,8 @@ class UniversalOptimizer:
         for param in params:
             if param.name in self.custom_space:
                 custom = self.custom_space[param.name]
+                hard_min = custom.get('hard_min', getattr(param, 'hard_min', None))
+                hard_max = custom.get('hard_max', getattr(param, 'hard_max', None))
                 
                 # 使用自定义配置覆盖默认值
                 new_param = StrategyParam(
@@ -443,12 +445,20 @@ class UniversalOptimizer:
                     description=custom.get('description', param.description),
                     min_value=custom.get('min', param.min_value),
                     max_value=custom.get('max', param.max_value),
-                    step=custom.get('step', param.step)
+                    step=custom.get('step', param.step),
+                    hard_min=hard_min,
+                    hard_max=hard_max
                 )
                 updated_params.append(new_param)
                 
                 if self.verbose:
-                    print(f"[自定义空间] {param.name}: [{new_param.min_value}, {new_param.max_value}]")
+                    hard_desc = []
+                    if hard_min is not None:
+                        hard_desc.append(f"hard_min={hard_min}")
+                    if hard_max is not None:
+                        hard_desc.append(f"hard_max={hard_max}")
+                    suffix = f" ({', '.join(hard_desc)})" if hard_desc else ""
+                    print(f"[自定义空间] {param.name}: [{new_param.min_value}, {new_param.max_value}]{suffix}")
             else:
                 updated_params.append(param)
         
@@ -538,6 +548,8 @@ class UniversalOptimizer:
                 print(f"║ 并行模式: 串行 (study.optimize) {'':40} ║")
             if auto_expand_boundary:
                 print(f"║ 边界二次搜索: 启用 (最多{max_expansion_rounds}轮) {'':40} ║")
+                print(f"║   • 边界阈值: {boundary_threshold:<58} ║")
+                print(f"║   • 扩展倍数: {expansion_factor:<58} ║")
             print(f"╚{'═'*78}╝")
         
         # 提取策略的默认参数，用于初始采样
@@ -682,6 +694,13 @@ class UniversalOptimizer:
                 expansion_factor=expansion_factor,
                 boundary_threshold=boundary_threshold
             )
+
+            if not expanded_names:
+                if self.verbose:
+                    print(f"\n╔{'═'*78}╗")
+                    print(f"║ {'⛔ 边界参数已达到硬性上下界，停止二次搜索'.center(66)} ║")
+                    print(f"╚{'═'*78}╝")
+                break
             
             if self.verbose:
                 print(f"\n╔{'═'*78}╗")
@@ -725,6 +744,8 @@ class UniversalOptimizer:
             result["param_space_analysis"] = param_analysis
             result["optimization_info"]["expansion_rounds"] = expansion_round
             result["optimization_info"]["auto_expand_boundary"] = auto_expand_boundary
+            result["optimization_info"]["boundary_threshold"] = boundary_threshold
+            result["optimization_info"]["boundary_expansion_factor"] = expansion_factor
             result["optimization_info"]["total_trials"] = actual_trials
             result["optimization_info"]["exploration_trials"] = exploration_trials
             result["optimization_info"]["exploitation_trials"] = exploitation_trials
