@@ -22,7 +22,7 @@ python run_optimizer.py [选项]
 | `--objective` | `-o` | string | `sharpe_ratio` | 优化目标函数。<br>**可选值:**<br>- `sharpe_ratio`: 夏普比率 (推荐)<br>- `annual_return`: 年化收益率<br>- `total_return`: 总收益率<br>- `max_drawdown`: 最大回撤 (最小化)<br>- `calmar_ratio`: 卡玛比率<br>- `sortino_ratio`: 索提诺比率 |
 | `--trials` | `-t` | int | `50` | 优化试验次数 (迭代次数)。<br>如果开启了动态试验 (默认开启)，这只是初始/最小次数。 |
 | `--params-file` | `-p` | string | None | 指定要优化的参数列表文件路径。<br>文件格式：每行一个参数名。<br>如果不指定，将优化策略中所有的 params。 |
-| `--space-config` | `-S` | string | None | 参数空间配置文件 (JSON) 路径。<br>用于手动指定参数的搜索范围 (min, max)。 |
+| `--space-config` | `-S` | string | None | 参数空间配置文件 (JSON) 路径。<br>用于手动指定参数的初始搜索范围 (`min`, `max`)；可选 `hard_min` / `hard_max` 作为自动边界扩展不可突破的硬性上下界。 |
 
 ## 3. 数据处理与多数据源
 
@@ -48,6 +48,8 @@ python run_optimizer.py [选项]
 | `--no-dynamic-trials` | bool | False | **禁用** 动态试验次数。<br>默认开启：根据参数空间大小自动调整试验次数。<br>开启此标志：严格使用 `--trials` 指定的次数。 |
 | `--no-boundary-search` | bool | False | **禁用** 边界二次搜索。<br>默认开启：如果最优解在边界附近，会自动扩展搜索范围。 |
 | `--max-boundary-rounds` | int | `2` | 边界搜索的最大扩展轮数。 |
+| `--boundary-threshold` | float | `0.1` | 边界触发阈值，必须在 `0` 和 `0.5` 之间。<br>例如 `0.2` 表示最优值落在区间前 20% 或后 20% 时触发边界拓展。 |
+| `--boundary-expansion-factor` | float | `1.5` | 边界拓展倍数，必须大于 `1`。<br>按当前区间宽度向外拓展，并受 `hard_min` / `hard_max` 裁剪。 |
 
 ## 6. LLM (大模型) 辅助优化
 

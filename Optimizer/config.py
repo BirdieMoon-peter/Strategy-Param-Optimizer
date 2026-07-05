@@ -41,6 +41,8 @@ class StrategyParam:
     min_value: Optional[float] = None
     max_value: Optional[float] = None
     step: Optional[float] = None
+    hard_min: Optional[float] = None  # 自动边界扩展不可突破的硬下界
+    hard_max: Optional[float] = None  # 自动边界扩展不可突破的硬上界
 
 
 # 各策略的参数定义

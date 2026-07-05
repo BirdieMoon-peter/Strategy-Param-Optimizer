@@ -105,6 +105,22 @@ def load_space_config(config_file: str) -> dict:
             raise ValueError(f"参数 '{param_name}' 必须指定 'min' 和 'max'")
         if param_config['min'] >= param_config['max']:
             raise ValueError(f"参数 '{param_name}' 的 min 必须小于 max")
+        hard_min = param_config.get('hard_min')
+        hard_max = param_config.get('hard_max')
+        if hard_min is not None and hard_max is not None and hard_min > hard_max:
+            raise ValueError(f"参数 '{param_name}' 的 hard_min 不能大于 hard_max")
+        if hard_min is not None and param_config['min'] < hard_min:
+            raise ValueError(
+                f"参数 '{param_name}' 的 min ({param_config['min']}) 不能小于 hard_min ({hard_min})"
+            )
+        if hard_max is not None and param_config['max'] > hard_max:
+            raise ValueError(
+                f"参数 '{param_name}' 的 max ({param_config['max']}) 不能大于 hard_max ({hard_max})"
+            )
+        if hard_min is not None and hard_min >= param_config['max']:
+            raise ValueError(f"参数 '{param_name}' 的 hard_min 必须小于 max")
+        if hard_max is not None and hard_max <= param_config['min']:
+            raise ValueError(f"参数 '{param_name}' 的 hard_max 必须大于 min")
     
     return param_space
 
@@ -480,6 +496,18 @@ def main():
         default=2,
         help="边界二次搜索最大轮数（默认: 2）"
     )
+    parser.add_argument(
+        "--boundary-threshold",
+        type=float,
+        default=0.1,
+        help="触发边界二次搜索的相对位置阈值，范围 0~0.5（默认: 0.1）"
+    )
+    parser.add_argument(
+        "--boundary-expansion-factor",
+        type=float,
+        default=1.5,
+        help="边界二次搜索的范围扩展倍数，必须大于 1（默认: 1.5）"
+    )
     
     # LLM参数
     parser.add_argument(
@@ -528,6 +556,14 @@ def main():
     )
     
     args = parser.parse_args()
+
+    if not 0 < args.boundary_threshold < 0.5:
+        print("❌ 错误: --boundary-threshold 必须在 0 和 0.5 之间")
+        return 1
+
+    if args.boundary_expansion_factor <= 1:
+        print("❌ 错误: --boundary-expansion-factor 必须大于 1")
+        return 1
 
     # 验证期货参数组合
     if args.asset_type == 'futures' and not args.contract_code and not args.broker_config:
@@ -767,6 +803,7 @@ def main():
                         print(f"[优化] 动态试验: 启用（将根据参数量自动调整）")
                     if enable_boundary:
                         print(f"[优化] 边界二次搜索: 启用（最多{args.max_boundary_rounds}轮）")
+                        print(f"[优化] 边界阈值: {args.boundary_threshold}, 扩展倍数: {args.boundary_expansion_factor}")
                     if args.no_parallel:
                         print(f"[优化] 并行模式: 禁用 (串行)\n")
                     else:
@@ -779,6 +816,8 @@ def main():
                     enable_dynamic_trials=enable_dynamic,
                     auto_expand_boundary=enable_boundary,
                     max_expansion_rounds=args.max_boundary_rounds,
+                    boundary_threshold=args.boundary_threshold,
+                    expansion_factor=args.boundary_expansion_factor,
                     use_parallel=not args.no_parallel,
                     n_workers=args.n_workers,
                     explore_batch_size=args.explore_batch,
@@ -858,6 +897,7 @@ def main():
                             print(f"[优化] 动态试验: 启用（将根据参数量自动调整）")
                         if enable_boundary:
                             print(f"[优化] 边界二次搜索: 启用（最多{args.max_boundary_rounds}轮）")
+                            print(f"[优化] 边界阈值: {args.boundary_threshold}, 扩展倍数: {args.boundary_expansion_factor}")
                         if args.no_parallel:
                             print(f"[优化] 并行模式: 禁用 (串行)\n")
                         else:
@@ -870,6 +910,8 @@ def main():
                         enable_dynamic_trials=enable_dynamic,
                         auto_expand_boundary=enable_boundary,
                         max_expansion_rounds=args.max_boundary_rounds,
+                        boundary_threshold=args.boundary_threshold,
+                        expansion_factor=args.boundary_expansion_factor,
                         use_parallel=not args.no_parallel,
                         n_workers=args.n_workers,
                         explore_batch_size=args.explore_batch,
