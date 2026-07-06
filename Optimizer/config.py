@@ -43,6 +43,8 @@ class StrategyParam:
     step: Optional[float] = None
     hard_min: Optional[float] = None  # 自动边界扩展不可突破的硬下界
     hard_max: Optional[float] = None  # 自动边界扩展不可突破的硬上界
+    boundary_base_min: Optional[float] = None  # 自动边界扩展的初始下界基准
+    boundary_base_max: Optional[float] = None  # 自动边界扩展的初始上界基准
 
 
 # 各策略的参数定义

@@ -49,7 +49,7 @@ python run_optimizer.py [选项]
 | `--no-boundary-search` | bool | False | **禁用** 边界二次搜索。<br>默认开启：如果最优解在边界附近，会自动扩展搜索范围。 |
 | `--max-boundary-rounds` | int | `2` | 边界搜索的最大扩展轮数。 |
 | `--boundary-threshold` | float | `0.1` | 边界触发阈值，必须在 `0` 和 `0.5` 之间。<br>例如 `0.2` 表示最优值落在区间前 20% 或后 20% 时触发边界拓展。 |
-| `--boundary-expansion-factor` | float | `1.5` | 边界拓展倍数，必须大于 `1`。<br>按当前区间宽度向外拓展，并受 `hard_min` / `hard_max` 裁剪。 |
+| `--boundary-expansion-factor` | float | `1.5` | 边界拓展倍数，必须大于 `1`。<br>按初始区间宽度逐轮向外拓展，并受 `hard_min` / `hard_max` 裁剪。 |
 
 ## 6. LLM (大模型) 辅助优化
 

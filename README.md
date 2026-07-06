@@ -146,7 +146,7 @@ pip install -r requirements.txt
 | `--no-boundary-search` | 关闭 | 禁用边界二次搜索 |
 | `--max-boundary-rounds` | `2` | 边界二次搜索最大轮数 |
 | `--boundary-threshold` | `0.1` | 最优参数落在搜索区间前/后多少比例内时触发边界拓展 |
-| `--boundary-expansion-factor` | `1.5` | 每轮边界拓展后的目标区间倍数，必须大于 `1` |
+| `--boundary-expansion-factor` | `1.5` | 每轮按初始区间宽度向外拓展的倍数，必须大于 `1` |
 
 #### LLM 参数
 
@@ -386,7 +386,7 @@ JSON 格式，手动指定各参数的搜索范围和分布类型：
 
 `min` / `max` 是本轮初始搜索范围；`hard_min` / `hard_max` 是可选硬性边界。启用自动边界二次搜索时，参数空间可以继续向外扩展，但不会突破对应的硬边界。未设置硬边界的参数保持原来的自动扩展行为。
 
-边界拓展范围由命令行参数控制：`--boundary-threshold` 决定多接近边界才触发二次搜索，`--boundary-expansion-factor` 决定每轮向外扩展多少。扩展按当前区间宽度计算，例如 `[10, 50]` 使用 `--boundary-expansion-factor 1.5` 且最优值接近上界时，会优先尝试扩到 `[10, 70]`，再受 `hard_max` 裁剪。
+边界拓展范围由命令行参数控制：`--boundary-threshold` 决定多接近边界才触发二次搜索，`--boundary-expansion-factor` 决定每轮向外扩展多少。扩展按初始区间宽度计算，例如 `[10, 50]` 使用 `--boundary-expansion-factor 1.5` 且最优值接近上界时，每轮向上增加 `20`，会优先尝试扩到 `[10, 70]`，再受 `hard_max` 裁剪。
 
 ##### 边界限制用法
 
@@ -588,14 +588,14 @@ spp_results/
 
 扩展策略:
   - 扩展因子: 默认 1.5x，可通过 --boundary-expansion-factor 调整
-  - 扩展方式: 按当前区间宽度向触及边界的方向扩展
+  - 扩展方式: 按初始区间宽度向触及边界的方向扩展，避免后续轮次越扩越快
   - 硬性边界: hard_min / hard_max 会裁剪最终范围
   - 最大扩展轮数: 默认 2 轮，可通过 --max-boundary-rounds 调整
 
 示例:
   参数 period 搜索范围 [10, 50]，最优值 = 48（触及上界）
   → 第1轮扩展: 范围变为 [10, 70]
-  → 若最优值仍触及边界 → 第2轮扩展: [10, 100]
+  → 若最优值仍触及边界 → 第2轮扩展: [10, 90]
   → 最多 2 轮后停止
 
 如果配置 hard_max=80:
