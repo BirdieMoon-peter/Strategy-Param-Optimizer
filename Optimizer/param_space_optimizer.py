@@ -481,12 +481,12 @@ class ParamSpaceOptimizer:
     def _expanded_lower_bound(
         self,
         param_def: StrategyParam,
-        param_range: float,
+        expansion_width: float,
         expansion_factor: float,
         hard_min: Optional[float]
     ) -> float:
-        """按当前区间宽度向下扩展，避免 0/负数范围下乘除法反向收缩。"""
-        raw_min = param_def.min_value - param_range * (expansion_factor - 1)
+        """按初始区间宽度向下扩展，避免后续轮次用已扩展区间反复放大。"""
+        raw_min = param_def.min_value - expansion_width * (expansion_factor - 1)
 
         if param_def.param_type == "int":
             new_min = math.floor(raw_min)
@@ -511,12 +511,12 @@ class ParamSpaceOptimizer:
     def _expanded_upper_bound(
         self,
         param_def: StrategyParam,
-        param_range: float,
+        expansion_width: float,
         expansion_factor: float,
         hard_max: Optional[float]
     ) -> float:
-        """按当前区间宽度向上扩展，并裁剪到硬上界。"""
-        raw_max = param_def.max_value + param_range * (expansion_factor - 1)
+        """按初始区间宽度向上扩展，并裁剪到硬上界。"""
+        raw_max = param_def.max_value + expansion_width * (expansion_factor - 1)
 
         if param_def.param_type == "int":
             new_max = math.ceil(raw_max)
@@ -527,6 +527,14 @@ class ParamSpaceOptimizer:
         if hard_max is not None:
             raw_max = min(raw_max, hard_max)
         return raw_max
+
+    def _boundary_base_bounds(self, param_def: StrategyParam) -> Tuple[float, float]:
+        """返回边界扩展的初始基准范围；第一次扩展时使用当前范围作为基准。"""
+        base_min = getattr(param_def, 'boundary_base_min', None)
+        base_max = getattr(param_def, 'boundary_base_max', None)
+        if base_min is None or base_max is None or base_max <= base_min:
+            return param_def.min_value, param_def.max_value
+        return base_min, base_max
     
     def expand_boundary_params(
         self,
@@ -573,13 +581,15 @@ class ParamSpaceOptimizer:
             needs_expansion = False
             hard_min = getattr(param_def, 'hard_min', None)
             hard_max = getattr(param_def, 'hard_max', None)
+            base_min, base_max = self._boundary_base_bounds(param_def)
+            expansion_width = base_max - base_min
             
             # 检查是否在边界附近
             if relative_pos < boundary_threshold:  # 接近下界
                 needs_expansion = True
                 new_min = self._expanded_lower_bound(
                     param_def,
-                    param_range,
+                    expansion_width,
                     expansion_factor,
                     hard_min
                 )
@@ -588,7 +598,7 @@ class ParamSpaceOptimizer:
                 needs_expansion = True
                 new_max = self._expanded_upper_bound(
                     param_def,
-                    param_range,
+                    expansion_width,
                     expansion_factor,
                     hard_max
                 )
@@ -607,7 +617,9 @@ class ParamSpaceOptimizer:
                         max_value=new_max,
                         step=param_def.step,
                         hard_min=hard_min,
-                        hard_max=hard_max
+                        hard_max=hard_max,
+                        boundary_base_min=base_min,
+                        boundary_base_max=base_max
                     )
                     expanded_space.append(expanded_param)
             else:
@@ -697,19 +709,21 @@ class ParamSpaceOptimizer:
             new_max = param_def.max_value
             hard_min = getattr(param_def, 'hard_min', None)
             hard_max = getattr(param_def, 'hard_max', None)
+            base_min, base_max = self._boundary_base_bounds(param_def)
+            expansion_width = base_max - base_min
             
             # 如果参数在边界附近，扩展范围
             if relative_pos < 0.1:  # 接近下界
                 new_min = self._expanded_lower_bound(
                     param_def,
-                    param_range,
+                    expansion_width,
                     expansion_factor,
                     hard_min
                 )
             elif relative_pos > 0.9:  # 接近上界
                 new_max = self._expanded_upper_bound(
                     param_def,
-                    param_range,
+                    expansion_width,
                     expansion_factor,
                     hard_max
                 )
@@ -734,7 +748,9 @@ class ParamSpaceOptimizer:
                 max_value=new_max,
                 step=param_def.step,
                 hard_min=hard_min,
-                hard_max=hard_max
+                hard_max=hard_max,
+                boundary_base_min=base_min,
+                boundary_base_max=base_max
             )
             refined_space.append(refined_param)
         
